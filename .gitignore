@@ -1,0 +1,29 @@
+# Vendor media and reverse-engineering artefacts.
+# These contain the copyrighted Linksys32 installation CD, extracted
+# proprietary binaries (PimMegaApi, Pixelink SDK, ActiveX controls), and
+# bulk string dumps. They are deliberately not published.
+backup/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
