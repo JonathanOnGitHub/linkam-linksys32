@@ -2,6 +2,10 @@
 
 Examples
 --------
+Check whether this machine is ready to talk to the instrument::
+
+    python -m linkam.cli doctor
+
 List serial ports and probe the framing::
 
     python -m linkam.cli ports
@@ -86,6 +90,36 @@ def _probe(args) -> int:
     return 0 if result.get("winner") else 1
 
 
+def _doctor(args) -> int:
+    from .diagnostics import format_report, run_checks
+
+    report = run_checks()
+    print(format_report(report))
+    if args.json:
+        import json as _json
+
+        print()
+        print(_json.dumps(
+            {
+                "ok": report.ok,
+                "worst": report.worst,
+                "counts": report.counts(),
+                "notes": report.notes,
+                "checks": [
+                    {
+                        "name": c.name,
+                        "status": c.status,
+                        "detail": c.detail,
+                        "hint": c.hint,
+                    }
+                    for c in report.checks
+                ],
+            },
+            indent=2,
+        ))
+    return 0 if report.ok else 1
+
+
 def _run(args) -> int:
     exp = Experiment(
         target_c=args.target,
@@ -121,6 +155,13 @@ def main(argv=None) -> int:
 
     sub.add_parser("ports", help="list serial ports")
 
+    d = sub.add_parser(
+        "doctor",
+        help="check whether this machine is ready to talk to the instrument",
+    )
+    d.add_argument("--json", action="store_true",
+                   help="also emit the report as JSON")
+
     p = sub.add_parser("probe", help="probe the framing on real hardware")
     p.add_argument("--port", required=True)
     p.add_argument("--baud", type=int, default=0,
@@ -154,6 +195,8 @@ def main(argv=None) -> int:
 
     if args.cmd == "ports":
         return _ports()
+    if args.cmd == "doctor":
+        return _doctor(args)
     if args.cmd == "probe":
         return _probe(args)
     if args.cmd == "run":

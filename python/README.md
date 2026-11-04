@@ -18,9 +18,10 @@ linkam/
   video.py       video capture backends (DirectShow / V4L2)
   experiment.py  orchestration: ramp + hold + concurrent capture
   simulator.py   software simulator of the programmer (no hardware needed)
+  diagnostics.py environment checks (read-only, no instrument needed)
   cli.py         command-line entry point
 PROTOCOL_NOTES.md  what was recovered, and what is still unverified
-tests/           23 tests, no hardware required
+tests/           49 tests, no hardware required
 ```
 
 ---
@@ -31,9 +32,43 @@ tests/           23 tests, no hardware required
 pip install -r requirements.txt
 ```
 
+---
+
+## First: check the machine is ready
+
+Before plugging anything in, run the environment check. It is entirely
+read-only — it does not open the port or send a command to the instrument:
+
+```bash
+python -m linkam.cli doctor
+```
+
+It reports:
+
+* Python version and whether `pyserial` / `numpy` / `opencv-python` import;
+* every serial port, with a judgement on whether it looks like a genuine
+  **USB-to-RS232** adapter or a **USB-to-TTL** breakout (the latter will
+  *not* drive the instrument);
+* whether the video backend is usable on this platform;
+* the protocol questions that can only be settled against real hardware;
+* whether `socat` is available for serial sniffing.
+
+Exit code is `0` when nothing failed, `1` if something did. Add `--json` for
+machine-readable output.
+
+The most valuable thing it can tell you: if your adapter is a USB-to-TTL
+breakout, it will say so. A TTL port has no RS-232 transceiver, so its
+levels are wrong and the programmer will never answer — a failure that looks
+identical to a framing bug.
+
+---
+
 ## Use
 
 ```bash
+# check this machine is ready (read-only)
+python -m linkam.cli doctor
+
 # list serial ports
 python -m linkam.cli ports
 
@@ -197,6 +232,71 @@ socat -v -x /dev/ttyUSB0,raw,echo=0 -
 ```
 
 That shows exactly what the vendor software sends and expects.
+
+---
+
+## First run on real hardware
+
+Recommended order. Each step is gated on the previous one working.
+
+**1. Environment.** `python -m linkam.cli doctor` — must not report FAIL.
+
+**2. Link.** Settle the framing. This issues read-only queries only, so it is
+safe on a cold instrument:
+
+```bash
+python -m linkam.cli probe --port /dev/ttyUSB0 --baud 9600
+```
+
+It sweeps baud × terminator and prints the combination that answered. If it
+prints `NO RESPONSE`, work through the checklist it prints: programmer
+powered on, correct DB9 gender/crossover, and confirm the adapter is
+genuine RS-232 rather than TTL.
+
+**3. Temperature only.** Before adding video, prove the temperature link on
+its own — it is the part you cannot work around:
+
+```python
+from linkam import LinkamProgrammer
+
+p = LinkamProgrammer("/dev/ttyUSB0", 9600)
+p.open()
+p.set_rate(5.0)
+p.set_limit(40.0)      # use a safe, non-damaging limit for the first test
+p.start()
+print(p.wait_for_temperature(40.0, timeout=600))
+p.stop()
+p.close()
+```
+
+**4. Video.** Only once temperature is reliable. Use `--no-video` on a
+`run` command to isolate the two paths.
+
+### Safety notes
+
+* There is **no overshoot protection** in this code. Nothing checks that the
+  measured temperature is tracking the requested limit, and `programme_ramp`
+  writes to profile row 1 without confirming what is already in it.
+* The ramp executes **in the hardware**, so a stalled Python process cannot
+  cause an overshoot — but a *wrong* limit can, and the host will not notice.
+* Start with a modest rate and a limit well below anything that would
+  damage the sample.
+* The instrument may refuse to ramp when unlicensed, independently of the
+  host software. Watch for `Not licensed` / `Demonstration expired` /
+  `Comms locked off` in the status channel.
+
+---
+
+## Scope limits
+
+This package drives the **temperature programmer** only. It does **not**
+implement the stage command vocabulary (`MA*`, `MM*`, `MV*`, `ZA`/`ZF`,
+`stdy`, `cw`, …). If your unit is an MDS gradient stage, stage positioning
+and stage registers are out of scope and will not work — see
+`PROTOCOL_NOTES.md` §1.1b.
+
+Video capture assumes a **Conexant BT848** card (the VideoFusion device).
+A modern USB camera will not be driven by the `dshow` backend as written.
 
 ---
 
