@@ -75,7 +75,8 @@ class FakeProgrammer(LinkamProgrammer):
         elif self.temp > target:
             self.temp = max(target, self.temp - rate_per_tick)
 
-    def wait_for_temperature(self, target_c, tolerance_c=0.5, timeout=3600.0):
+    def wait_for_temperature(self, target_c, tolerance_c=0.5, timeout=3600.0,
+                             *, stall_timeout=None, min_progress_c=0.2):
         """Simulate the ramp, emitting telemetry as we go."""
         while abs(self.temp - target_c) > tolerance_c:
             self._step()

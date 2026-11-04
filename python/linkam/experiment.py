@@ -88,6 +88,14 @@ class Experiment:
     #: Hold at the target indefinitely when `hold_s` is 0.  Set False to
     #: return as soon as the ramp completes.
     hold_forever: bool = True
+    #: Give up if the programmer reports a temperature but does not move for
+    #: this many seconds.  This is what turns "the instrument silently
+    #: refused to ramp" into a clear error.  Set to None to wait for the
+    #: full ramp timeout instead.
+    stall_timeout: float | None = 120.0
+    #: Smallest temperature change that counts as progress toward the
+    #: target.  Should exceed the sensor noise.
+    min_progress_c: float = 0.2
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
@@ -268,7 +276,15 @@ class IsothermalRun:
             prog.start()
 
             # 2. wait for the limit to be reached
-            prog.wait_for_temperature(self.exp.target_c, tolerance_c=0.5)
+            #
+            # `stall_timeout` makes a refused ramp fail fast with a clear
+            # message instead of hanging until the ramp timeout expires.
+            prog.wait_for_temperature(
+                self.exp.target_c,
+                tolerance_c=0.5,
+                stall_timeout=self.exp.stall_timeout,
+                min_progress_c=self.exp.min_progress_c,
+            )
 
             # 3. optional hold
             if self.exp.hold_s:

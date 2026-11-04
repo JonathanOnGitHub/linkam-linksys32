@@ -375,7 +375,9 @@ def _check_protocol(report: DiagnosticReport) -> None:
         INFO,
         "the instrument may refuse to ramp when unlicensed",
         "Watch the status channel for 'Not licensed', 'Demonstration "
-        "expired' or 'Comms locked off'.",
+        "expired' or 'Comms locked off'. If the ramp is refused, "
+        "wait_for_temperature raises ProgrammerNotRamping after "
+        "stall_timeout seconds rather than hanging.",
     ))
 
 

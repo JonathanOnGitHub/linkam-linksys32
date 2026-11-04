@@ -121,6 +121,8 @@ def _doctor(args) -> int:
 
 
 def _run(args) -> int:
+    from .protocol import ProgrammerNotRamping
+
     exp = Experiment(
         target_c=args.target,
         rate_c_per_min=args.rate,
@@ -136,6 +138,8 @@ def _run(args) -> int:
         save_video=not args.no_video,
         save_frames=args.save_frames,
         strict_framing=args.strict_framing,
+        stall_timeout=(args.stall_timeout if args.stall_timeout > 0 else None),
+        min_progress_c=args.min_progress,
     )
     run = IsothermalRun(exp)
     try:
@@ -143,6 +147,10 @@ def _run(args) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except ProgrammerNotRamping as exc:
+        print("RAMP REFUSED — the programmer is not moving.", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 3
     print(result.summary())
     return 0
 
@@ -186,6 +194,12 @@ def main(argv=None) -> int:
     r.add_argument("--save-frames", action="store_true")
     r.add_argument("--strict-framing", action="store_true",
                    help="use CR instead of CRLF as the command terminator")
+    r.add_argument("--stall-timeout", type=float, default=120.0,
+                   help="seconds without progress before declaring the ramp "
+                        "refused (use 0 to wait indefinitely)")
+    r.add_argument("--min-progress", type=float, default=0.2,
+                   help="temperature change (C) that counts as progress "
+                        "toward the target")
 
     args = ap.parse_args(argv)
     logging.basicConfig(

@@ -21,7 +21,7 @@ linkam/
   diagnostics.py environment checks (read-only, no instrument needed)
   cli.py         command-line entry point
 PROTOCOL_NOTES.md  what was recovered, and what is still unverified
-tests/           49 tests, no hardware required
+tests/           55 tests, no hardware required
 ```
 
 ---
@@ -284,6 +284,37 @@ p.close()
 * The instrument may refuse to ramp when unlicensed, independently of the
   host software. Watch for `Not licensed` / `Demonstration expired` /
   `Comms locked off` in the status channel.
+
+### If the ramp is refused
+
+If the instrument will not heat or cool, `wait_for_temperature` notices
+that the temperature is being reported but is not moving, and raises
+`ProgrammerNotRamping` rather than hanging until the ramp timeout:
+
+```
+ProgrammerNotRamping: the programmer is reporting 23.40 C but is not moving
+toward 95.00 C (closest approach 23.40 C) after 120s. The ramp was most
+likely refused: check for an unlicensed instrument, demonstration mode or
+OEM mode, confirm the programmed rate is non-zero, and check that the limit
+differs from the current temperature.
+```
+
+This is on by default with a 120 s window. It is rate-aware: a genuine
+slow ramp is judged against the rate the programmer reports, so a 1 C/min
+ramp is not mistaken for a stalled one.
+
+```python
+from linkam import ProgrammerNotRamping
+
+try:
+    p.wait_for_temperature(95.0, stall_timeout=60.0)
+except ProgrammerNotRamping as exc:
+    print(exc)
+```
+
+Tune it with `--stall-timeout <seconds>` (use `0` to disable and wait for
+the full ramp timeout) and `--min-progress <celsius>` on the `run`
+command.
 
 ---
 

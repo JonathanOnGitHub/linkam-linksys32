@@ -15,7 +15,9 @@ Sub-modules
 
 from .experiment import Experiment, ExperimentResult, IsothermalRun
 from .protocol import (
+    ConnectionError_,
     LinkamProgrammer,
+    ProgrammerNotRamping,
     ProgrammerState,
     ProtocolError,
     Telemetry,
@@ -32,6 +34,8 @@ __all__ = [
     "LinkamProgrammer",
     "ProgrammerState",
     "ProtocolError",
+    "ConnectionError_",
+    "ProgrammerNotRamping",
     "Telemetry",
     "parse_telemetry",
     "Frame",

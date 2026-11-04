@@ -57,6 +57,7 @@ __all__ = [
     "LinkamProgrammer",
     "ProtocolError",
     "ConnectionError_",
+    "ProgrammerNotRamping",
 ]
 
 
@@ -66,6 +67,21 @@ class ProtocolError(Exception):
 
 class ConnectionError_(Exception):
     """Comm port could not be opened, or the link dropped."""
+
+
+class ProgrammerNotRamping(Exception):
+    """The programmer is connected and reporting, but not moving.
+
+    Distinct from :class:`TimeoutError`: this says the temperature is being
+    reported but is *not changing*, which usually means the ramp was
+    refused rather than that it was slow.  Common causes:
+
+    * the instrument is unlicensed, in demonstration mode, or in OEM mode,
+      so it declines to heat or cool;
+    * ``Prog start`` was not accepted;
+    * the programmed rate is zero;
+    * the limit is already at the current temperature.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -479,11 +495,16 @@ class LinkamProgrammer:
         hold_s: float = 0.0,
         *,
         timeout: float = 3600.0,
+        stall_timeout: float | None = None,
+        min_progress_c: float = 0.2,
     ) -> None:
         """Heat/cool to `target_c` at `rate_c_per_min`, then optionally hold.
 
         This is the core of an isothermal experiment: set a rate, set the
         limit, start, and wait for the ramp to reach the limit.
+
+        See :meth:`wait_for_temperature` for the meaning of
+        `stall_timeout` and `min_progress_c`.
         """
         if hold_s:
             self.set_hold_time(hold_s)
@@ -491,30 +512,136 @@ class LinkamProgrammer:
         self.set_limit(target_c)
         self.start()
 
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
-            st = self._state
-            if st.temperature is None or st.limit is None:
-                continue
-            if abs(st.temperature - st.limit) <= 0.5:
-                return
-        raise TimeoutError(f"did not reach {target_c} C within {timeout}s")
+        self.wait_for_temperature(
+            target_c,
+            timeout=timeout,
+            stall_timeout=stall_timeout,
+            min_progress_c=min_progress_c,
+        )
 
     def wait_for_temperature(
         self,
         target_c: float,
         tolerance_c: float = 0.5,
         timeout: float = 3600.0,
+        *,
+        stall_timeout: float | None = None,
+        min_progress_c: float = 0.2,
     ) -> float:
-        """Block until the measured temperature is within `tolerance_c`."""
+        """Block until the measured temperature is within `tolerance_c`.
+
+        If `stall_timeout` is given, this gives up early when the
+        programmer is reporting a temperature but **not moving**.  That is
+        the common failure mode when the instrument refuses to heat or
+        cool — for example when it is unlicensed, in demonstration mode, or
+        in OEM mode — and it is much better to report that after a couple
+        of minutes than to sit until `timeout` expires with no
+        explanation.
+
+        How "not moving" is decided
+        ----------------------------
+        A ramp is judged stalled when the temperature has not come
+        *meaningfully closer* to the target for `stall_timeout` seconds.
+        "Meaningfully closer" means the error has shrunk by at least
+        `min_progress_c` **or** by a margin consistent with the
+        programmed rate.
+
+        The rate-aware test matters: a genuine 0.5 C/min ramp improves the
+        error by only 0.008 C every second, so a purely absolute threshold
+        would eventually declare a real ramp stalled.  When the programmer
+        reports a rate, the expected movement over the stall window is
+        compared against the observed movement instead, so slow ramps are
+        given the time they need while a genuinely frozen instrument is
+        caught quickly.
+
+        Raises :class:`ProgrammerNotRamping` if the temperature stalls,
+        or :class:`TimeoutError` if the overall deadline passes first.
+        """
         deadline = time.monotonic() + timeout
+
+        # Stall detection bookkeeping.
+        stall_deadline: float | None = None
+        best_error: float | None = None   # smallest |T - target| seen so far
+        best_temp: float | None = None    # temperature at that best error
+        #: The temperature and the time at the start of the current stall
+        #: window.  A stall window is a period during which we have not
+        #: confirmed genuine progress; it is reset whenever progress is
+        #: confirmed.
+        window_temp: float | None = None
+        window_at: float = time.monotonic()
+
         while time.monotonic() < deadline:
             st = self._state
             if st.temperature is not None:
-                if abs(st.temperature - target_c) <= tolerance_c:
+                error = abs(st.temperature - target_c)
+                if error <= tolerance_c:
                     return st.temperature
+
+                if best_error is None:
+                    # First reading: record it and open the stall window.
+                    best_error = error
+                    best_temp = st.temperature
+                    window_temp = st.temperature
+                    window_at = time.monotonic()
+                    if stall_timeout is not None:
+                        stall_deadline = time.monotonic() + stall_timeout
+                else:
+                    # Movement toward the target since the start of the
+                    # current stall window.
+                    moved = window_temp - error if window_temp is not None else 0.0
+
+                    # A stall is only declared if the temperature has not
+                    # come meaningfully closer.  "Meaningfully" is judged
+                    # two ways:
+                    #
+                    #  * an absolute floor (`min_progress_c`), which catches
+                    #    a completely frozen instrument; and
+                    #  * against the programmed rate, so that a genuinely
+                    #    slow ramp is not mistaken for a stall.  A real
+                    #    ramp at `rate` should close the gap by roughly
+                    #    rate * elapsed/60.
+                    #
+                    # The rate test uses the *programmed* rate, which the
+                    # programmer reports in telemetry, rather than a
+                    # threshold, so it scales with however slow the ramp
+                    # really is.
+                    progressed = moved >= min_progress_c
+                    if not progressed:
+                        rate = self._state.rate
+                        if rate and rate > 0:
+                            elapsed = time.monotonic() - window_at
+                            expected = abs(rate) * elapsed / 60.0
+                            # Require only a fraction of the implied
+                            # movement, to tolerate noise and a late start.
+                            progressed = moved >= expected * 0.5
+
+                    if progressed:
+                        best_error = error
+                        best_temp = st.temperature
+                        # Open a fresh stall window from here.
+                        window_temp = st.temperature
+                        window_at = time.monotonic()
+                        if stall_timeout is not None:
+                            stall_deadline = time.monotonic() + stall_timeout
+                    # else: no meaningful progress — the stall clock keeps running.
+
+                if (
+                    stall_timeout is not None
+                    and stall_deadline is not None
+                    and time.monotonic() >= stall_deadline
+                ):
+                    raise ProgrammerNotRamping(
+                        f"the programmer is reporting {st.temperature:.2f} C "
+                        f"but is not moving toward {target_c:.2f} C "
+                        f"(closest approach {best_temp:.2f} C) after "
+                        f"{stall_timeout:.0f}s. The ramp was most likely "
+                        "refused: check for an unlicensed instrument, "
+                        "demonstration mode or OEM mode, confirm the "
+                        "programmed rate is non-zero, and check that the "
+                        "limit differs from the current temperature."
+                    )
             time.sleep(0.1)
+
         raise TimeoutError(
             f"temperature did not reach {target_c} C within {timeout}s"
         )
