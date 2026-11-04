@@ -194,3 +194,55 @@ def test_telemetry_roundtrip_preserves_values():
     assert tlm.rate == pytest.approx(10.0)
     assert tlm.limit == pytest.approx(25.4)
     assert tlm.vacuum == pytest.approx(0.1)
+
+
+def test_run_metadata_matches_telemetry_csv(tmp_path):
+    """run.json and telemetry.csv must describe the same samples.
+
+    The reader thread appends telemetry continuously, so reading the
+    sample list once for the CSV and again for the summary could yield
+    two different lengths, leaving run.json reporting a final
+    temperature that never appears in the CSV.
+
+    The race window is narrow, so this test injects a telemetry frame
+    deterministically right after the CSV is written -- exactly where a
+    real reader thread would land.
+    """
+    prog = FakeProgrammer(start_c=20.0, target_c=95.0, rate_c_per_min=600.0)
+    video = FakeVideo(n=5)
+
+    exp = Experiment(
+        target_c=95.0,
+        rate_c_per_min=600.0,
+        hold_s=0.0,
+        hold_forever=False,
+        output_dir=tmp_path / "consistent",
+    )
+    run = IsothermalRun(exp, programmer=prog, video=video)
+
+    # Simulate the reader thread landing between the CSV write and the
+    # summary read: append one more frame once the CSV has been written.
+    original_write = run._write_telemetry_csv
+
+    def write_then_race(telemetry):
+        path = original_write(telemetry)
+        extra = parse_telemetry("Temp 12.34 °C~Rate 600.0 °C/min")
+        with run._lock:
+            run._telemetry.append(extra)
+        return path
+
+    run._write_telemetry_csv = write_then_race
+    result = run.start()
+
+    out = tmp_path / "consistent"
+    lines = (out / "telemetry.csv").read_text().strip().splitlines()
+    csv_rows = len(lines) - 1  # minus the header
+
+    # the injected frame must NOT be counted by the summary
+    assert result.telemetry_samples == csv_rows
+
+    # the reported final temperature must be the last one in the CSV
+    header = lines[0].split(",")
+    temp_col = header.index("temperature")
+    last_csv_temp = float(lines[-1].split(",")[temp_col])
+    assert result.final_temperature_c == pytest.approx(last_csv_temp, abs=1e-6)

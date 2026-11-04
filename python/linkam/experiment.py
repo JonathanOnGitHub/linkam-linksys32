@@ -193,15 +193,27 @@ class IsothermalRun:
                 self._frames.append(frame)
 
     # -- persistence ------------------------------------------------------ #
-    def _write_telemetry_csv(self) -> Path:
+    def _snapshot_telemetry(self) -> list[Telemetry]:
+        """Take an atomic copy of the telemetry received so far.
+
+        The reader thread appends to ``self._telemetry`` continuously, so
+        reading that list more than once can yield *different* lengths on
+        two successive reads.  Taking one copy under the lock and using it
+        for both the CSV and the run summary guarantees the two always
+        describe the same set of samples.
+        """
+        with self._lock:
+            return list(self._telemetry)
+
+    def _write_telemetry_csv(self, telemetry: list[Telemetry]) -> Path:
         path = self.exp.output_dir / "telemetry.csv"
-        keys = sorted({k for t in self._telemetry for k in t.values})
+        keys = sorted({k for t in telemetry for k in t.values})
         with path.open("w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["timestamp", "elapsed_s", *keys])
-            if self._telemetry:
-                t0 = self._telemetry[0].received_at
-                for t in self._telemetry:
+            if telemetry:
+                t0 = telemetry[0].received_at
+                for t in telemetry:
                     w.writerow(
                         [f"{t.received_at:.6f}",
                          f"{t.received_at - t0:.3f}",
@@ -313,24 +325,26 @@ class IsothermalRun:
             self._stop.set()
             tel_thread.join(timeout=2.0)
             vid_thread.join(timeout=2.0)
-            self._write_telemetry_csv()
+            # Take one snapshot and use it for every output, so that
+            # telemetry.csv and run.json always describe the same samples.
+            telemetry = self._snapshot_telemetry()
+            self._write_telemetry_csv(telemetry)
             self._write_video()
             self._write_frames()
             self._close()
 
-        with self._lock:
-            final_t = self._telemetry[-1].temperature if self._telemetry else None
-            result = ExperimentResult(
-                started_at=started,
-                finished_at=finished,
-                target_c=self.exp.target_c,
-                rate_c_per_min=self.exp.rate_c_per_min,
-                hold_s=self.exp.hold_s,
-                frames_captured=len(self._frames),
-                telemetry_samples=len(self._telemetry),
-                final_temperature_c=final_t,
-                output_dir=self.exp.output_dir,
-            )
+        final_t = telemetry[-1].temperature if telemetry else None
+        result = ExperimentResult(
+            started_at=started,
+            finished_at=finished,
+            target_c=self.exp.target_c,
+            rate_c_per_min=self.exp.rate_c_per_min,
+            hold_s=self.exp.hold_s,
+            frames_captured=len(self._frames),
+            telemetry_samples=len(telemetry),
+            final_temperature_c=final_t,
+            output_dir=self.exp.output_dir,
+        )
         self._write_meta(result)
         log.info("experiment done: %s", result.summary())
         return result

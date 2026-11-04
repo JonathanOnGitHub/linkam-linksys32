@@ -21,8 +21,15 @@ linkam/
   diagnostics.py environment checks (read-only, no instrument needed)
   cli.py         command-line entry point
 PROTOCOL_NOTES.md  what was recovered, and what is still unverified
-tests/           55 tests, no hardware required
+RUNBOOK.md     step-by-step first-run checklist for real hardware
+tools/
+  find_adapter.py  identify the USB-to-RS232 adapter and judge RS-232 vs TTL
+tests/           77 tests, no hardware required
 ```
+
+> New to this, and holding real hardware? Start with **`RUNBOOK.md`** — it
+> is an ordered checklist that takes you from "adapter plugged in" to a
+> first measured temperature, with the failure modes explained.
 
 ---
 
@@ -43,7 +50,18 @@ read-only — it does not open the port or send a command to the instrument:
 python -m linkam.cli doctor
 ```
 
-It reports:
+Then, once the adapter is plugged in, identify it:
+
+```bash
+python tools/find_adapter.py
+```
+
+This lists every serial port with its USB vendor/product IDs, the
+kernel driver bound to it, and a judgement on whether it is a genuine
+**USB-to-RS232** adapter or a **USB-to-TTL** breakout (the latter will
+*not* drive the instrument).
+
+`doctor` reports:
 
 * Python version and whether `pyserial` / `numpy` / `opencv-python` import;
 * every serial port, with a judgement on whether it looks like a genuine
