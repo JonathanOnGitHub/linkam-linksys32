@@ -531,6 +531,19 @@ The poll frame is implemented in `linkam/t95.py:build_status_poll`.
 1. **The command frames.**  What has to be written to change the
    setpoint, start a ramp or stop one.  This is the blocker for
    "set temperature"; see §6.
+
+   Ruled out so far, by experiment:
+
+   * every ASCII command from the Linksys32 vocabulary, in a dozen
+     encodings (§5.5);
+   * the request being **symmetric** with the reply — i.e. a command
+     being `[gate][gate][…][float32 argument at offset 10, 14, 18 or
+     22]`, with the command code in the gate bytes.  64 combinations
+     (command codes 0x00–0x0f × four argument offsets) were sent and
+     the status was re-polled after each; **nothing moved**.  Note
+     that these frames all satisfy the acceptance gate, so they are
+     safe to send — the instrument did not wedge on any of them.
+
 6. What the two constant floats at offsets 18 and 22 are.
 7. What block 2's flag byte (offset 34) and constant byte (offset 51)
    mean.
