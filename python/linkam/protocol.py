@@ -49,12 +49,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
+from .transport import SerialTransport, Transport, TransportTimeout
+
 log = logging.getLogger(__name__)
 
 __all__ = [
     "ProgrammerState",
     "Telemetry",
     "LinkamProgrammer",
+    "HidProgrammer",
     "ProtocolError",
     "ConnectionError_",
     "ProgrammerNotRamping",
@@ -273,11 +276,13 @@ class LinkamProgrammer:
         *,
         timeout: float = 2.0,
         strict_framing: bool = False,
+        transport: Transport | None = None,
     ) -> None:
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self.strict_framing = strict_framing
+        self._transport: Transport | None = transport
         self._serial = None
         self._terminator_bytes: bytes | None = None
         self._lock = threading.RLock()
@@ -287,27 +292,32 @@ class LinkamProgrammer:
         self._stop = threading.Event()
 
     # -- lifecycle -------------------------------------------------------- #
-    def open(self) -> None:
-        """Open the comm port and start the background reader thread."""
-        import serial  # pyserial, imported lazily
+    def _make_transport(self) -> Transport:
+        """Build the underlying link.  Overridden by :class:`HidProgrammer`."""
+        return SerialTransport(self.port, self.baudrate, timeout=self.timeout)
 
-        self._serial = serial.Serial(
-            self.port, self.baudrate, timeout=0.2, write_timeout=self.timeout
-        )
+    def open(self) -> None:
+        """Open the link and start the background reader thread."""
+        if self._transport is None:
+            self._transport = self._make_transport()
+        self._transport.open()
         self._stop.clear()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
         self._state.connected = True
-        log.info("opened %s at %d baud", self.port, self.baudrate)
+        log.info("opened %s", self._transport.description)
 
     def close(self) -> None:
         self._stop.set()
         if self._reader is not None:
             self._reader.join(timeout=2.0)
             self._reader = None
-        if self._serial is not None:
-            self._serial.close()
-            self._serial = None
+        if self._transport is not None:
+            try:
+                self._transport.close()
+            finally:
+                self._transport = None
+        self._serial = None
         self._state.connected = False
 
     def __enter__(self) -> "LinkamProgrammer":
@@ -330,13 +340,19 @@ class LinkamProgrammer:
 
     def send(self, command: str) -> None:
         """Send a raw command string."""
-        if self._serial is None:
-            raise ConnectionError_("port is not open")
         payload = command.encode("ascii", "replace") + self._terminator()
         with self._lock:
             log.debug("-> %r", payload)
-            self._serial.write(payload)
-            self._serial.flush()
+            if self._transport is not None:
+                self._transport.write_line(command, self._terminator())
+                return
+            # Backwards compatibility: a caller may have injected a raw
+            # pyserial-like object into ``_serial`` (the tests do this).
+            if self._serial is not None:
+                self._serial.write(payload)
+                self._serial.flush()
+                return
+            raise ConnectionError_("port is not open")
 
     def request(self, command: str, timeout: float | None = None) -> str:
         """Send a command and return the next non-empty response line."""
@@ -344,25 +360,35 @@ class LinkamProgrammer:
         return self.read_line(timeout)
 
     def read_line(self, timeout: float | None = None) -> str:
-        """Read one line from the port."""
-        if self._serial is None:
-            raise ConnectionError_("port is not open")
+        """Read one line from the link."""
         deadline = time.monotonic() + (timeout if timeout is not None else self.timeout)
-        buf = bytearray()
-        while time.monotonic() < deadline:
-            chunk = self._serial.read(1)
-            if not chunk:
-                continue
-            buf += chunk
-            if chunk in (b"\r", b"\n"):
-                if buf[-1:] == chunk and len(buf) == 1:
-                    continue  # swallow a bare CR or LF
-                line = buf[:-1].decode("ascii", "replace").strip()
-                if line:
-                    log.debug("<- %r", line)
-                    return line
-                buf.clear()
-        raise ProtocolError(f"timeout waiting for response to {command!r}")
+        if self._transport is None:
+            # Legacy path: read from an injected pyserial-like object.
+            if self._serial is None:
+                raise ConnectionError_("port is not open")
+            buf = bytearray()
+            while time.monotonic() < deadline:
+                chunk = self._serial.read(1)
+                if not chunk:
+                    continue
+                buf += chunk
+                if chunk in (b"\r", b"\n"):
+                    if buf[-1:] == chunk and len(buf) == 1:
+                        continue  # swallow a bare CR or LF
+                    line = buf[:-1].decode("ascii", "replace").strip()
+                    if line:
+                        log.debug("<- %r", line)
+                        return line
+                    buf.clear()
+            raise ProtocolError("timeout waiting for response")
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProtocolError("timeout waiting for response")
+            try:
+                return self._transport.read_line(remaining)
+            except TransportTimeout:
+                raise ProtocolError("timeout waiting for response")
 
     def _read_loop(self) -> None:
         """Background thread: parse telemetry and dispatch to listeners."""
@@ -719,21 +745,112 @@ class LinkamProgrammer:
 
     def reopen(self, baudrate: int, terminator: bytes) -> None:
         """Close and re-open the port at a different speed/framing."""
-        import serial  # pyserial
-
-        if self._serial is not None:
+        if self._transport is not None:
             try:
-                self._serial.close()
+                self._transport.close()
             except Exception:
                 pass
-            self._serial = None
+            self._transport = None
         self.baudrate = baudrate
         self._terminator_bytes = terminator
-        self._serial = serial.Serial(
-            self.port, baudrate, timeout=0.2, write_timeout=self.timeout
-        )
+        self._transport = self._make_transport()
+        self._transport.open()
         # drain anything the instrument sent while we were reconfiguring
         try:
-            self._serial.reset_input_buffer()
+            if isinstance(self._transport, SerialTransport):
+                self._transport._serial.reset_input_buffer()
         except Exception:
             pass
+
+
+class HidProgrammer(LinkamProgrammer):
+    """A Linkam T95 temperature programmer over USB HID.
+
+    The T95 is a USB HID device (``16da:0002``), not a serial port, so it
+    needs a different physical link -- but the **application layer is
+    identical**: the same ASCII commands and the same ASCII telemetry
+    strings.  This class therefore inherits every bit of the ramp logic,
+    stall detection and telemetry parsing from :class:`LinkamProgrammer`
+    and only replaces the transport.
+
+    Example
+    -------
+    ::
+
+        from linkam import HidProgrammer
+
+        p = HidProgrammer()
+        p.open()
+        p.on_telemetry(lambda t: print(t.temperature))
+        ...
+        p.close()
+
+    The command vocabulary is unchanged, so ``p.programme_ramp(...)`` and
+    ``p.start()`` mean exactly what they do on the serial link.
+    """
+
+    def __init__(
+        self,
+        node: str | None = None,
+        *,
+        framing: str = "raw",
+        report_size: int | None = None,
+        input_report_id: int | None = None,
+        output_report_id: int | None = None,
+        timeout: float = 2.0,
+        strict_framing: bool = False,
+        vendor: int = 0x16DA,
+        product: int = 0x0002,
+    ) -> None:
+        # ``port`` is meaningless for HID; pass the hidraw node so that
+        # the inherited attributes still make sense in log messages.
+        super().__init__(
+            node or "hidraw",
+            timeout=timeout,
+            strict_framing=strict_framing,
+        )
+        self.node = node
+        self.framing = framing
+        self.report_size = report_size
+        self.input_report_id = input_report_id
+        self.output_report_id = output_report_id
+        self.vendor = vendor
+        self.product = product
+
+    def _make_transport(self) -> Transport:
+        from .hid import HidTransport
+
+        return HidTransport(
+            self.node,
+            framing=self.framing,
+            report_size=self.report_size,
+            input_report_id=self.input_report_id,
+            output_report_id=self.output_report_id,
+            vendor=self.vendor,
+            product=self.product,
+            timeout=self.timeout,
+        )
+
+    def probe(self, *args, **kwargs) -> dict:
+        """Probe the HID link.
+
+        The serial implementation sweeps baud rates, which is meaningless
+        over HID -- there is no baud rate.  Instead this tries the
+        candidate report framings and reports which one the instrument
+        answers.
+        """
+        from .hid import discover
+
+        results = discover(self.node)
+        winner = next((r for r in results if r.get("response")), None)
+        return {
+            "port": self.node or "auto",
+            "tried": [r["framing"] for r in results],
+            "winner": (
+                {"framing": winner["framing"], "command": "MA6"}
+                if winner
+                else None
+            ),
+            "response": winner["response"] if winner else None,
+            "details": results,
+        }

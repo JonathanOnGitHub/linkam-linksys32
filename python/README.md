@@ -14,7 +14,9 @@ subset of **Linkam Linksys32**, reverse-engineered from the shipped CD.
 
 ```
 linkam/
-  protocol.py    Linkam temperature programmer serial protocol
+  protocol.py    Linkam temperature programmer protocol + command vocabulary
+  transport.py   physical-link abstraction (serial / HID)
+  hid.py         USB HID transport for the Linkam T95 (16da:0002)
   video.py       video capture backends (DirectShow / V4L2)
   experiment.py  orchestration: ramp + hold + concurrent capture
   simulator.py   software simulator of the programmer (no hardware needed)
@@ -23,13 +25,59 @@ linkam/
 PROTOCOL_NOTES.md  what was recovered, and what is still unverified
 RUNBOOK.md     step-by-step first-run checklist for real hardware
 tools/
-  find_adapter.py  identify the USB-to-RS232 adapter and judge RS-232 vs TTL
-tests/           77 tests, no hardware required
+  find_adapter.py  identify the instrument (USB HID) or the USB-to-RS232 adapter
+  t95_hid_probe.py read-only HID reconnaissance: descriptor + framing probe
+tests/           110 tests, no hardware required
 ```
 
 > New to this, and holding real hardware? Start with **`RUNBOOK.md`** — it
 > is an ordered checklist that takes you from "adapter plugged in" to a
 > first measured temperature, with the failure modes explained.
+
+---
+
+## Two links, one protocol
+
+The Linkam application layer is **line-oriented ASCII text** regardless of
+the physical link.  That was established statically from the shipped
+binaries: `LinksysActXLib.ocx` reads replies with VB's
+`__vbaLineInputStr`, and the telemetry frame is a plain string such as
+
+```
+Temp 23.4 °C~Rate 10 °C/min~Limit 25.4 °C
+```
+
+Only the *framing* differs between links, so the package is split at
+that seam:
+
+| Link | Transport | Notes |
+|------|-----------|-------|
+| RS-232 (legacy Linksys32) | `transport.SerialTransport` | ASCII line, CR/LF/CRLF, baud rate |
+| USB HID (**Linkam T95**) | `hid.HidTransport` | ASCII line inside an HID report |
+
+Everything above the transport — telemetry parsing, ramp sequencing,
+stall detection, CSV output — is shared.  `LinkamProgrammer` is the
+serial one; `HidProgrammer` is the T95 one, and it inherits all of the
+ramp logic.  The command vocabulary (`Prog start`, `prog ramp 1 rate 5
+limit 40 time 60`, …) is **identical** on both.
+
+### The T95 is USB HID, not a serial port
+
+The T95 enumerates as `16da:0002` and appears as a `/dev/hidraw*` node.
+It needs **no** USB-to-RS232 adapter.  On Linux:
+
+```bash
+python -m linkam.cli doctor      # reports the HID device and its permissions
+python tools/find_adapter.py      # same, with the "what do I do next" hints
+```
+
+Permission to open the node comes from a udev rule:
+
+```
+# /etc/udev/rules.d/70-linkam-t95.rules
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="16da", ATTRS{idProduct}=="0002", \
+    MODE="0660", GROUP="plugdev", TAG+="uaccess"
+```
 
 ---
 
@@ -50,7 +98,7 @@ read-only — it does not open the port or send a command to the instrument:
 python -m linkam.cli doctor
 ```
 
-Then, once the adapter is plugged in, identify it:
+Then, once the instrument is plugged in, identify it:
 
 ```bash
 python tools/find_adapter.py
@@ -110,6 +158,29 @@ Outputs in `--out`:
 | `frames/` | individual JPEGs (only with `--save-frames`) |
 | `run.json` | run metadata |
 
+### The T95 (USB HID)
+
+The T95 uses `--hid` instead of `--port`, and needs no serial adapter:
+
+```bash
+# reconnaissance: find the device, dump the HID report descriptor,
+# and work out how the ASCII payload is framed (all read-only)
+python tools/t95_hid_probe.py 30
+
+# probe the link (read-only)
+python -m linkam.cli probe --hid
+
+# temperature only, modest limit, no video
+python -m linkam.cli run --hid \
+    --target 40 --rate 5 --hold 60 --no-video \
+    --out results/first_test
+```
+
+`probe --hid` tries each candidate report framing (`raw`, `id_text`,
+`text_padded`, `length_prefixed`) and reports which one the instrument
+answers.  Pass the winner back with `--hid-framing`.  Once that is
+settled it should be hard-coded as the default.
+
 ### As a library
 
 ```python
@@ -126,6 +197,20 @@ exp = Experiment(
 )
 result = IsothermalRun(exp).start()
 print(result.summary())
+```
+
+For the T95, use `HidProgrammer` directly — it is the same object with a
+different transport, so every method (`programme_ramp`, `start`, `stop`,
+`on_telemetry`, `wait_for_temperature`) behaves identically:
+
+```python
+from linkam import HidProgrammer
+
+p = HidProgrammer()
+p.open()
+p.on_telemetry(lambda t: print(f"{t.temperature} {t.units.get('temperature')}"))
+input("Ctrl-C to stop\n")
+p.close()
 ```
 
 ---

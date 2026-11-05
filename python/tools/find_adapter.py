@@ -32,6 +32,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Allow running this script directly from the project directory.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 # Substrings in a USB product string that indicate a genuine RS-232
 # transceiver on the DB9.
 RS232_MARKERS = (
@@ -136,7 +141,64 @@ def usb_id_text(info: dict) -> str:
     return " ".join(p for p in parts if p)
 
 
+def report_hid() -> int | None:
+    """Report the Linkam T95's USB HID link, if present.
+
+    Returns an exit code if a T95 was found (0), or ``None`` if there is
+    no HID device so that the serial-port logic can take over.
+    """
+    try:
+        from linkam.hid import find_link
+    except ImportError:
+        return None
+
+    link = find_link()
+    if link is None:
+        return None
+
+    print("\nUSB HID device (Linkam T95)")
+    print(f"  hidraw node  : {link.node}")
+    print(f"  product      : {link.name or 'Linkam T95'}")
+    if link.uniq:
+        print(f"  serial no.   : {link.uniq}")
+    if link.vendor is not None and link.product is not None:
+        print(f"  usb id       : {link.vendor:04x}:{link.product:04x}")
+
+    try:
+        fd = os.open(link.node, os.O_RDWR | os.O_CLOEXEC)
+    except OSError as exc:
+        print(f"  verdict      : [!!] cannot open ({exc.strerror or exc})")
+        print("                  Install a udev rule so the node is")
+        print("                  group-writable, e.g.:")
+        print('                    SUBSYSTEM=="hidraw", ATTRS{idVendor}=="16da",')
+        print('                    ATTRS{idProduct}=="0002", MODE="0660",')
+        print('                    GROUP="plugdev", TAG+="uaccess"')
+        return 1
+    else:
+        os.close(fd)
+
+    print("  verdict      : [OK] T95 detected and accessible")
+    print()
+    print("  This is a USB HID device, NOT a serial port. It needs no")
+    print("  USB-to-RS232 adapter. Use --hid instead of --port:")
+    print("    .venv/bin/python -m linkam.cli probe --hid")
+    print("    .venv/bin/python -m linkam.cli run --hid \\")
+    print("        --target 40 --rate 5 --hold 60 --no-video")
+    return 0
+
+
 def main() -> int:
+    # The T95 is a HID device; check for it first, since it needs no
+    # serial adapter and the serial-port diagnostics do not apply.
+    hid_result = report_hid()
+    if hid_result is not None:
+        if hid_result == 0:
+            print()
+            print("=" * 72)
+            print("LINKAM T95 FOUND — use the --hid transport.")
+            print("=" * 72)
+        return hid_result
+
     try:
         from serial.tools import list_ports
     except ImportError:

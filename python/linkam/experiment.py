@@ -77,6 +77,16 @@ class Experiment:
     output_dir: Path = field(default_factory=lambda: Path("linkam_run"))
     serial_port: str = "/dev/ttyUSB0"
     baudrate: int = 9600
+    #: Use the USB HID link (Linkam T95) instead of the legacy RS-232
+    #: serial link.  When true, `hid_node` selects the hidraw device.
+    use_hid: bool = False
+    #: Explicit hidraw node, e.g. ``/dev/hidraw1``.  ``None`` means
+    #: "discover the T95 automatically".
+    hid_node: str | None = None
+    #: HID report framing; see :mod:`linkam.hid`.
+    hid_framing: str = "raw"
+    #: Output report size in bytes; ``None`` means "discover it".
+    hid_report_size: int | None = None
     video_backend: str = "auto"
     video_device: str | int = 0
     video_width: int = 640
@@ -132,11 +142,20 @@ class IsothermalRun:
         exp.output_dir.mkdir(parents=True, exist_ok=True)
 
         if self.programmer is None:
-            self.programmer = LinkamProgrammer(
-                exp.serial_port,
-                exp.baudrate,
-                strict_framing=exp.strict_framing,
-            )
+            if exp.use_hid:
+                from .protocol import HidProgrammer
+
+                self.programmer = HidProgrammer(
+                    exp.hid_node,
+                    framing=exp.hid_framing,
+                    report_size=exp.hid_report_size,
+                )
+            else:
+                self.programmer = LinkamProgrammer(
+                    exp.serial_port,
+                    exp.baudrate,
+                    strict_framing=exp.strict_framing,
+                )
         # Always open the programmer, whether we created it or it was
         # supplied by the caller.  A caller-supplied programmer (e.g. the
         # simulator, or one the user opened themselves) may still need its

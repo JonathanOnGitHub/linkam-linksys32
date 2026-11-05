@@ -11,6 +11,12 @@ List serial ports and probe the framing::
     python -m linkam.cli ports
     python -m linkam.cli probe --port /dev/ttyUSB0 --baud 9600
 
+The Linkam T95 is a USB HID device rather than a serial port, so it uses
+``--hid`` instead of ``--port``::
+
+    python -m linkam.cli probe --hid
+    python -m linkam.cli run --hid --target 40 --rate 5 --no-video
+
 Run an isothermal experiment with simultaneous capture::
 
     python -m linkam.cli run \\
@@ -28,7 +34,19 @@ import logging
 import sys
 
 from .experiment import Experiment, IsothermalRun
-from .protocol import LinkamProgrammer
+from .protocol import ConnectionError_, HidProgrammer, LinkamProgrammer
+
+
+def _make_programmer(args):
+    """Build the programmer object for the selected transport."""
+    if getattr(args, "hid", False):
+        return HidProgrammer(
+            args.hid_node or None,
+            framing=args.hid_framing,
+            report_size=args.hid_report_size,
+            timeout=args.timeout,
+        )
+    return LinkamProgrammer(args.port, args.baud, strict_framing=False)
 
 
 def _ports() -> int:
@@ -49,11 +67,12 @@ def _ports() -> int:
 
 
 def _probe(args) -> int:
-    prog = LinkamProgrammer(args.port, args.baud, strict_framing=False)
+    prog = _make_programmer(args)
     bauds = None
-    if args.baud:
-        bauds = [args.baud, *LinkamProgrammer.CANDIDATE_BAUDS]
-        bauds = list(dict.fromkeys(bauds))
+    if not getattr(args, "hid", False):
+        if args.baud:
+            bauds = [args.baud, *LinkamProgrammer.CANDIDATE_BAUDS]
+            bauds = list(dict.fromkeys(bauds))
     try:
         result = prog.probe(bauds=bauds, timeout=args.timeout)
     except Exception as exc:
@@ -68,24 +87,38 @@ def _probe(args) -> int:
     if result.get("winner"):
         w = result["winner"]
         print("LINK ESTABLISHED")
-        print(f"  baudrate   : {w['baudrate']}")
-        print(f"  terminator : {w['terminator']!r}")
+        if "framing" in w:
+            print(f"  framing    : {w['framing']}")
+        else:
+            print(f"  baudrate   : {w['baudrate']}")
+            print(f"  terminator : {w['terminator']!r}")
         print(f"  command    : {w['command']!r}")
         print(f"  response   : {result['response']!r}")
         print()
-        print("Use these in your run:")
-        print(f"  --baud {w['baudrate']}"
-              + (" --strict-framing" if w["terminator"] == "cr" else ""))
+        if "framing" in w:
+            print("Use this in your run:")
+            print(f"  --hid-framing {w['framing']}")
+        else:
+            print("Use these in your run:")
+            print(f"  --baud {w['baudrate']}"
+                  + (" --strict-framing" if w["terminator"] == "cr" else ""))
     else:
         print("NO RESPONSE from the instrument.")
         print(f"tried {len(result['tried'])} combinations: "
               f"{', '.join(result['tried'][:8])} ...")
         print()
-        print("Checklist:")
-        print("  - is the programmer powered on?")
-        print("  - is the RS232 cable the right gender / crossover?")
-        print("  - is the adapter a true RS-232 adapter (not TTL)?")
-        print("  - try the other cable / a null-modem crossover")
+        if getattr(args, "hid", False):
+            print("Checklist:")
+            print("  - is the T95 powered on and plugged in?")
+            print("  - lsusb | grep 16da   (should show 'Linkam T95')")
+            print("  - is /dev/hidraw* readable?")
+            print("    (the udev rule should give it group plugdev)")
+        else:
+            print("Checklist:")
+            print("  - is the programmer powered on?")
+            print("  - is the RS232 cable the right gender / crossover?")
+            print("  - is the adapter a true RS-232 adapter (not TTL)?")
+            print("  - try the other cable / a null-modem crossover")
     print(json.dumps(result, indent=2, default=str))
     return 0 if result.get("winner") else 1
 
@@ -128,8 +161,12 @@ def _run(args) -> int:
         rate_c_per_min=args.rate,
         hold_s=args.hold,
         output_dir=args.out,
-        serial_port=args.port,
+        serial_port=args.port or "/dev/ttyUSB0",
         baudrate=args.baud,
+        use_hid=bool(args.hid),
+        hid_node=args.hid_node,
+        hid_framing=args.hid_framing,
+        hid_report_size=args.hid_report_size,
         video_backend=args.video_backend,
         video_device=args.video_device,
         video_width=args.width,
@@ -151,6 +188,20 @@ def _run(args) -> int:
         print("RAMP REFUSED — the programmer is not moving.", file=sys.stderr)
         print(f"  {exc}", file=sys.stderr)
         return 3
+    except ConnectionError_ as exc:
+        print(f"CANNOT REACH THE INSTRUMENT: {exc}", file=sys.stderr)
+        if args.hid:
+            print("  The T95 is a USB HID device. Check:", file=sys.stderr)
+            print("    lsusb | grep 16da", file=sys.stderr)
+            print("    ls -l /dev/hidraw*", file=sys.stderr)
+        else:
+            print("  Check that the instrument is powered on and that the "
+                  "serial port is correct:", file=sys.stderr)
+            print("    .venv/bin/python tools/find_adapter.py", file=sys.stderr)
+        return 4
+    except (OSError, ValueError) as exc:
+        print(f"FAILED TO START: {exc}", file=sys.stderr)
+        return 4
     print(result.summary())
     return 0
 
@@ -171,14 +222,32 @@ def main(argv=None) -> int:
                    help="also emit the report as JSON")
 
     p = sub.add_parser("probe", help="probe the framing on real hardware")
-    p.add_argument("--port", required=True)
+    p.add_argument("--port", help="serial port (legacy RS-232 link)")
+    p.add_argument("--hid", action="store_true",
+                   help="probe the USB HID link (Linkam T95)")
+    p.add_argument("--hid-node", default=None,
+                   help="explicit hidraw node, e.g. /dev/hidraw1")
+    p.add_argument("--hid-framing", default="raw",
+                   choices=["raw", "id_text", "text_padded", "length_prefixed"],
+                   help="HID report framing to use")
+    p.add_argument("--hid-report-size", type=int, default=None,
+                   help="output report size in bytes (default: discover)")
     p.add_argument("--baud", type=int, default=0,
                    help="try this baud first (0 = sweep all candidates)")
     p.add_argument("--timeout", type=float, default=1.0,
                    help="per-attempt response timeout in seconds")
 
     r = sub.add_parser("run", help="run an isothermal experiment with capture")
-    r.add_argument("--port", required=True)
+    r.add_argument("--port", help="serial port (legacy RS-232 link)")
+    r.add_argument("--hid", action="store_true",
+                   help="use the USB HID link (Linkam T95)")
+    r.add_argument("--hid-node", default=None,
+                   help="explicit hidraw node, e.g. /dev/hidraw1")
+    r.add_argument("--hid-framing", default="raw",
+                   choices=["raw", "id_text", "text_padded", "length_prefixed"],
+                   help="HID report framing to use")
+    r.add_argument("--hid-report-size", type=int, default=None,
+                   help="output report size in bytes (default: discover)")
     r.add_argument("--baud", type=int, default=9600)
     r.add_argument("--target", type=float, required=True, help="target °C")
     r.add_argument("--rate", type=float, default=10.0, help="°C/min")
@@ -211,6 +280,14 @@ def main(argv=None) -> int:
         return _ports()
     if args.cmd == "doctor":
         return _doctor(args)
+    if args.cmd in ("probe", "run"):
+        # Exactly one transport must be selected.
+        if args.hid and args.port:
+            print("choose either --hid or --port, not both", file=sys.stderr)
+            return 2
+        if not args.hid and not args.port:
+            print("one of --hid or --port is required", file=sys.stderr)
+            return 2
     if args.cmd == "probe":
         return _probe(args)
     if args.cmd == "run":

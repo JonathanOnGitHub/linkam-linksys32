@@ -333,7 +333,93 @@ channel.
 
 ---
 
-## 5. Summary of open questions
+## 5. The T95: a USB HID link, not a serial port
+
+The Linkam **T95** is a USB HID device, so none of the RS-232 framing
+above applies to its physical layer.  It enumerates as:
+
+| Property | Value |
+|---|---|
+| USB VID:PID | `16da:0002` |
+| Product string | `Linkam T95` |
+| HID unique ID | `1234` |
+| Class | USB HID |
+| Endpoints | 2 interrupt |
+| Maximum IN report | 64 bytes |
+| `bInterval` | 1 ms |
+| Linux node | `/dev/hidraw1` (stable alias `/dev/input/by-id/usb-Linkam_T95_1234-hidraw`) |
+| Driver | `hid-generic` |
+
+Because it is a HID device it needs **no** USB-to-RS232 adapter — the
+earlier RS-232-centric analysis in this document still applies to the
+*application layer* (the command keywords, the telemetry format and the
+semantics of Rate/Limit/Hold), but the *framing* is different.
+
+### 5.1 What was observed directly
+
+* The device is **silent until prompted**.  A 30 s passive listen on the
+  hidraw node produced **zero** unsolicited input frames.
+* hidraw output reports are accepted at lengths 2, 4, 8, 16, 32 and 64.
+  A **1-byte** output report is rejected with `EINVAL`.
+* `HIDIOCSINPUT` and `HIDIOCSFEATURE` both fail with `EPIPE` — the device
+  implements neither.
+* `HIDIOCGRDESC` fails with `EINVAL` while `usbhid` holds interface 0.
+  `lsusb -v` correspondingly reports `Report Descriptors: ** UNAVAILABLE **`.
+  This is *not* yet proof that the device has no report descriptor; the
+  ioctl may simply be refused because another driver owns the interface.
+
+### 5.2 The architectural consequence
+
+The application layer recovered in §1 is **line-oriented ASCII text**:
+`LinksysActXLib.ocx` reads replies with VB's `__vbaLineInputStr`, and
+the telemetry frame is a plain string.  It is therefore plausible — and
+by far the cheapest hypothesis — that the T95 carries *the same ASCII
+strings* inside HID report envelopes.
+
+If that holds, then the entire protocol implementation above applies
+unchanged, and only the transport needs replacing.  That is how the
+package is built: `linkam/transport.py` defines the seam
+(`write_line` / `read_line`), `linkam/transport.py:SerialTransport`
+implements the RS-232 side, and `linkam/hid.py:HidTransport` implements
+the HID side.  `LinkamProgrammer` and `HidProgrammer` share every line
+of ramp logic, stall detection and telemetry parsing.
+
+### 5.3 Candidate report framings
+
+Until the real framing is observed, four candidates are supported:
+
+| Framing | Layout of one report |
+|---|---|
+| `raw` | ASCII payload at byte 0 (report ID first, if the device uses IDs) |
+| `id_text` | byte 0 is the report ID, ASCII from byte 1 |
+| `text_padded` | ASCII at byte 0 of a report with no report ID, zero-padded |
+| `length_prefixed` | a length byte (or 16-bit length) then that many ASCII bytes |
+
+`tools/t95_hid_probe.py` tries each and reports which one answers.  It
+sends only `MA6`, which reads a stage register and changes nothing.
+
+### 5.4 Still UNVERIFIED for the T95
+
+1. The actual report framing (see §5.3).
+2. Whether the T95 uses report IDs at all.
+3. The output report length it expects.
+4. Whether the telemetry is pushed periodically (as on the serial link)
+   or only in response to a query.
+5. Whether the command terminator (CR / LF / CRLF) still applies inside
+   the HID payload.
+6. Whether the T95 supports the same command vocabulary as the older
+   RS-232 programmers, or a subset.
+
+### 5.5 Note on the telemetry encoding
+
+The telemetry contains `°C` — a **degree sign**, which is UTF-8
+(`0xC2 0xB0`), not ASCII.  Decoding HID payloads as ASCII with
+`errors="replace"` silently corrupts the unit on every frame.  The HID
+transport decodes UTF-8.
+
+---
+
+## 6. Summary of open questions
 
 | # | Question | How to resolve |
 |---|---|---|
@@ -343,8 +429,14 @@ channel.
 | 4 | Baud rate for a given programmer | `CHIPDEF.INI` `Baud=` rows; try 9600/19200/38400 |
 | 5 | Does the hardware require a licence to ramp? | observe `Not licensed` in telemetry |
 | 6 | Does `Prog start` need a preceding `Prog Hold`/`Prog rate`? | try the documented order |
+| 7 | T95 report framing | `python tools/t95_hid_probe.py 30` |
+| 8 | T95 report IDs and output size | the same probe, from the report descriptor |
+| 9 | T95 telemetry cadence (push or poll?) | listen on the hidraw node after a query |
 
 A **serial sniffer** (e.g. `socat -v -x /dev/ttyUSB0,raw,echo=0 -` or a
 two-port loopback with pyserial) running alongside the real Linksys32
 software is the fastest way to close questions 1–3 in one pass: it shows
 both directions of the exact traffic the shipped software generates.
+
+For the T95, questions 7–9 are answered by
+`python tools/t95_hid_probe.py 30`, which is entirely read-only.

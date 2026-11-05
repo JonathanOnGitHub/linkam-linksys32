@@ -402,6 +402,70 @@ def _check_tools(report: DiagnosticReport) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def _check_hid(report: DiagnosticReport) -> None:
+    """Check for the Linkam T95's USB HID link.
+
+    The T95 is a USB HID device (``16da:0002``), not a serial port, so it
+    needs a completely different transport.  This check is read-only: it
+    looks for the device and for permission to open it, but sends nothing.
+    """
+    if not sys.platform.startswith("linux"):
+        report.add(Check(
+            "hid device (T95)",
+            INFO,
+            "USB HID is only checked on Linux",
+            "The Linkam T95 HID link is driven through hidraw, which is a "
+            "Linux interface. On Windows use the vendor Linksys32 software.",
+        ))
+        return
+
+    try:
+        from .hid import find_link
+    except Exception as exc:  # pragma: no cover - import guard
+        report.add(Check("hid device (T95)", FAIL, f"cannot load HID support: {exc}"))
+        return
+
+    link = find_link()
+    if link is None:
+        report.add(Check(
+            "hid device (T95)",
+            WARN,
+            "no Linkam T95 found on USB",
+            "Plug the T95 in and check `lsusb | grep 16da`. If it is listed "
+            "but not detected here, the hidraw node may be missing or the "
+            "udev permission rule may not be installed.",
+        ))
+        return
+
+    detail = f"{link.node} — {link.name or 'Linkam T95'}"
+    if link.uniq:
+        detail += f" (uniq {link.uniq})"
+
+    # Can we actually open it?
+    try:
+        fd = os.open(link.node, os.O_RDWR | os.O_CLOEXEC)
+    except OSError as exc:
+        report.add(Check(
+            "hid device (T95)",
+            FAIL,
+            f"{detail} — cannot open: {exc.strerror or exc}",
+            "Install the udev rule so the hidraw node is group-writable, e.g. "
+            "/etc/udev/rules.d/70-linkam-t95.rules with "
+            'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="16da", '
+            'ATTRS{idProduct}=="0002", MODE="0660", GROUP="plugdev", '
+            'TAG+="uaccess"',
+        ))
+        return
+    else:
+        os.close(fd)
+
+    report.add(Check(
+        "hid device (T95)",
+        OK,
+        f"{detail} — accessible",
+    ))
+
+
 # Entry points
 # --------------------------------------------------------------------------- #
 
@@ -409,6 +473,7 @@ def run_checks() -> DiagnosticReport:
     """Run every diagnostic check and return the report."""
     report = DiagnosticReport()
     _check_python(report)
+    _check_hid(report)
     _check_serial(report)
     _check_video(report)
     _check_protocol(report)
