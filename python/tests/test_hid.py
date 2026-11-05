@@ -34,16 +34,43 @@ def test_ioc_matches_linux_layout():
 
     Getting this wrong is what caused the earlier HIDIOCGRDESC failure.
     """
+    # The layout is (dir << 30) | (size << 16) | (type << 8) | nr.
+    assert hid._IOC_NRSHIFT == 0
+    assert hid._IOC_TYPESHIFT == 8
+    assert hid._IOC_SIZESHIFT == 16
+    assert hid._IOC_DIRSHIFT == 30
+
     # HIDIOCGRDESCSIZE is _IOR('H', 0x01, int) -> size 4.
     assert hid._ioc(hid._IOC_READ, ord("H"), 0x01, 4) == 0x80044801
-    # HIDIOCGRDESC is _IOR('H', 0x02, struct hidraw_report_descriptor)
-    # where the struct is 4 + 4096 bytes.
-    assert hid._ioc(hid._IOC_READ, ord("H"), 0x02, 4 + 4096) == 0x90044802
+
+
+def test_report_descriptor_ioctl_size_is_correctly_encoded():
+    """HIDIOCGRDESC must encode ``sizeof(struct hidraw_report_descriptor)``.
+
+    The struct is ``__u32 size`` plus ``__u8 value[4096]``, so its size
+    is 4100 bytes and that is what the ioctl size field must carry.
+
+    Regression test: an earlier version shifted the size field by 14
+    bits instead of 16, so the encoded size was 1 rather than 4100 and
+    every call to HIDIOCGRDESC failed with EINVAL -- which looked
+    exactly like "another driver owns the interface".  The T95's report
+    descriptor was unobtainable until this was fixed.
+    """
+    assert hid.HID_MAX_DESCRIPTOR_SIZE == 4096
+    expected_size = 4 + hid.HID_MAX_DESCRIPTOR_SIZE
+    assert expected_size == 4100
+
+    size_field = (hid._HIDIOCGRDESC >> hid._IOC_SIZESHIFT) & 0x3FFF
+    assert size_field == expected_size, (
+        f"HIDIOCGRDESC encodes size {size_field}, expected {expected_size}"
+    )
 
 
 def test_report_descriptor_constants_are_correct():
     assert hid._HIDIOCGRDESCSIZE == 0x80044801
+    # 0x90044802 encodes a size of 4100.
     assert hid._HIDIOCGRDESC == 0x90044802
+    assert hid._HIDIOCGRAWINFO == 0x80084803
 
 
 # --------------------------------------------------------------------------- #
@@ -245,17 +272,29 @@ def test_telemetry_string_survives_the_round_trip(patched_hidraw):
 # --------------------------------------------------------------------------- #
 
 
-def test_discover_output_size_picks_smallest_accepted(patched_hidraw):
-    """The real T95 rejects 1-byte reports and accepts 2 and up."""
+def test_t95_report_size_comes_from_the_descriptor_not_probing(patched_hidraw):
+    """The T95's payload is 63 bytes, as its report descriptor says.
+
+    No probing is done, because probing means writing to the device.
+    """
     patched_hidraw.accepted_sizes = (2, 4, 8, 16, 32, 64)
-    t = HidTransport("/dev/hidraw1", framing="raw")
+    t = HidTransport("/dev/hidraw1", framing="text_padded")
+    t.open()
+    assert t._out_size == 63
+    assert not patched_hidraw.written, "opening the device should not write to it"
+
+
+def test_discover_output_size_picks_smallest_accepted(patched_hidraw):
+    """For an unknown device, the size is discovered by probing."""
+    patched_hidraw.accepted_sizes = (2, 4, 8, 16, 32, 64)
+    t = HidTransport("/dev/hidraw1", framing="raw", vendor=0x1234, product=0x5678)
     t.open()
     assert t._out_size == 2
 
 
 def test_discover_output_size_handles_only_large_reports(patched_hidraw):
     patched_hidraw.accepted_sizes = (32, 64)
-    t = HidTransport("/dev/hidraw1", framing="raw")
+    t = HidTransport("/dev/hidraw1", framing="raw", vendor=0x1234, product=0x5678)
     t.open()
     assert t._out_size == 32
 
@@ -266,7 +305,7 @@ def test_discovery_probe_payload_is_inert(patched_hidraw):
     A ramp must never start as a side effect of opening the device.
     """
     patched_hidraw.accepted_sizes = (2, 4, 8, 16, 32, 64)
-    t = HidTransport("/dev/hidraw1", framing="raw")
+    t = HidTransport("/dev/hidraw1", framing="raw", vendor=0x1234, product=0x5678)
     t.open()
     for payload in patched_hidraw.written:
         lowered = payload.lower()
@@ -360,3 +399,66 @@ def test_read_report_descriptor_handles_refusal(monkeypatch):
 
     monkeypatch.setattr(fcntl, "ioctl", boom)
     assert read_report_descriptor("/dev/hidraw1") == b""
+
+
+def test_output_size_is_derived_from_the_report_descriptor(monkeypatch):
+    """The transport should read the descriptor rather than probe.
+
+    Probing means writing to the device; reading the descriptor does
+    not.  The T95's descriptor says the Output report is 63 bytes.
+    """
+    from linkam.hid_descriptor import ReportDescriptorParser
+
+    descriptor = bytes([
+        0x06, 0x00, 0xFF,   # Usage Page (0xFF00)
+        0x09, 0x01,         # Usage (0x01)
+        0xA1, 0x01,         # Collection (Application)
+        0x75, 0x08,         # Report Size (8)
+        0x95, 0x3F,         # Report Count (63)
+        0x09, 0x02,         # Usage (0x02)
+        0x91, 0x02,         # Output
+        0xC0,               # End Collection
+    ])
+
+    monkeypatch.setattr(hid, "read_report_descriptor", lambda node: descriptor)
+    monkeypatch.setattr(hid, "_hidraw_nodes", lambda: ["/dev/hidraw1"])
+    monkeypatch.setattr(
+        hid,
+        "_read_uevent_strings",
+        lambda node: {"HID_ID": "0003:000016DA:00000002", "HID_NAME": "Linkam T95"},
+    )
+
+    fake = FakeHidraw()
+    monkeypatch.setattr(os, "open", fake.open)
+    monkeypatch.setattr(os, "close", fake.close)
+
+    t = hid.HidTransport()
+    t.open()
+    try:
+        assert t._out_size == 63
+        assert not fake.written, "deriving the size must not write to the device"
+    finally:
+        t.close()
+
+
+def test_report_sizes_helper_reports_output_size():
+    from linkam.hid_descriptor import (
+        ReportDescriptorParser,
+        report_sizes,
+        uses_report_ids,
+    )
+
+    descriptor = bytes([
+        0x06, 0x00, 0xFF,
+        0x09, 0x01,
+        0xA1, 0x01,
+        0x75, 0x08,
+        0x95, 0x3F,
+        0x09, 0x02,
+        0x91, 0x02,
+        0xC0,
+    ])
+    p = ReportDescriptorParser()
+    p.parse(descriptor)
+    assert report_sizes(p) == {"OUTPUT": 63}
+    assert uses_report_ids(p) is False

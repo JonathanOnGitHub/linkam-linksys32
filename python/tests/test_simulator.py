@@ -110,3 +110,90 @@ def test_simulator_stop_halts_ramp():
         assert p.temp_c < t_at_stop
     finally:
         p.close()
+
+
+def test_simulator_enters_hold_when_the_limit_is_reached():
+    """The ramp must transition to holding once the limit is reached.
+
+    Regression test: the transition to "holding" used to be tested only
+    in the "standby" state, so once the mode became "heating" the
+    branch was never taken again.  The ramp would sit at the limit
+    forever and the hold would never start.
+    """
+    p = SimulatedProgrammer(start_c=20.0, ambient_c=20.0, noise_c=0.0)
+    p.open()
+    try:
+        p.programme_ramp(row=1, rate=600.0, limit=25.0, time_s=2.0)
+        p.start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if p.mode == "holding":
+                break
+            time.sleep(0.02)
+        assert p.mode == "holding", f"never entered holding (mode={p.mode})"
+        assert p.hold_remaining > 0
+    finally:
+        p.close()
+
+
+def test_simulator_hold_counts_down_and_ends():
+    """The hold must count down and then stop, exactly once."""
+    p = SimulatedProgrammer(start_c=20.0, ambient_c=20.0, noise_c=0.0)
+    p.open()
+    try:
+        p.programme_ramp(row=1, rate=600.0, limit=25.0, time_s=1.0)
+        p.start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and p.mode != "holding":
+            time.sleep(0.02)
+        assert p.mode == "holding"
+
+        # The hold should finish and the mode should settle at standby.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and p.mode == "holding":
+            time.sleep(0.02)
+        assert p.mode == "standby"
+
+        # And it must not start again.
+        time.sleep(1.0)
+        assert p.mode == "standby"
+        assert p.hold_remaining == 0.0
+    finally:
+        p.close()
+
+
+def test_simulator_hold_reports_the_temperature_as_stable():
+    """During a hold the temperature must stop changing."""
+    p = SimulatedProgrammer(start_c=20.0, ambient_c=20.0, noise_c=0.0)
+    p.open()
+    try:
+        p.programme_ramp(row=1, rate=600.0, limit=25.0, time_s=3.0)
+        p.start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and p.mode != "holding":
+            time.sleep(0.02)
+        assert p.mode == "holding"
+
+        t_hold = p.temp_c
+        time.sleep(1.0)
+        assert abs(p.temp_c - t_hold) < 0.01
+    finally:
+        p.close()
+
+
+def test_simulator_prog_hold_command_forces_a_hold():
+    """``Prog Hold`` forces the current temperature to be held."""
+    p = SimulatedProgrammer(start_c=42.0, ambient_c=20.0, noise_c=0.0)
+    p.open()
+    try:
+        p.send("prog time 5")
+        p.hold()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and p.mode != "holding":
+            time.sleep(0.02)
+        assert p.mode == "holding"
+        t_hold = p.temp_c
+        time.sleep(0.8)
+        assert abs(p.temp_c - t_hold) < 0.05
+    finally:
+        p.close()

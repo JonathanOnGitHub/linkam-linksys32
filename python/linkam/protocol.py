@@ -672,6 +672,150 @@ class LinkamProgrammer:
             f"temperature did not reach {target_c} C within {timeout}s"
         )
 
+    def wait_for_stable_temperature(
+        self,
+        target_c: float,
+        duration_s: float,
+        *,
+        tolerance_c: float = 0.5,
+        settle_s: float = 1.0,
+        timeout: float | None = None,
+        poll_s: float = 0.1,
+    ) -> float:
+        """Block until the temperature has been *at* `target_c` for `duration_s`.
+
+        This is the host-side view of a hold: the measured temperature must
+        stay within `tolerance_c` of `target_c` continuously for
+        `duration_s` seconds.
+
+        Why this exists
+        ---------------
+        The programmer runs the hold itself -- the compound command
+        ``prog ramp <row> rate <r> limit <l> time <t>`` tells it to hold
+        for `t` seconds once it reaches the limit.  The host must
+        therefore *not* simply sleep for `t` seconds and then stop: that
+        would double-count the hold, and would cut the real hold short
+        whenever the ramp-completion check returned late.
+
+        Measuring the hold from the telemetry instead makes the host
+        agree with the physics, and works whether or not the instrument
+        honours the ``time`` parameter itself.
+
+        Settling, not just "in range"
+        -----------------------------
+        Simply requiring the temperature to be *within* `tolerance_c` of
+        the target is not enough: a temperature that is still ramping
+        towards the target passes through that band on its way, and the
+        hold timer would start during the ramp rather than at the top of
+        it.  On a slow ramp that can eat the entire hold.
+
+        So the temperature must also have **stopped moving**.  It counts
+        as settled once it has stayed within `settle_s` of the target
+        *and* moved no more than `max_drift_c` over that window.  Only
+        then does the hold clock start, and if the temperature drifts
+        out again the clock restarts from zero.
+
+        A note on timing
+        ----------------
+        Because the host can only infer "the temperature has stopped
+        moving" by *observing* it, the measured hold runs slightly longer
+        than `duration_s`: by up to `settle_s` plus one telemetry period.
+        That is deliberate -- it guarantees the hold is never cut short.
+        The instrument's own ``time`` parameter is what determines the
+        scientifically meaningful hold window; this method only decides
+        when it is safe to stop the programmer.
+        """
+        if timeout is None:
+            # Allow generous slack: the hold has to complete, and a slow
+            # ramp should not be cut short.
+            timeout = duration_s + settle_s + 300.0
+
+        deadline = time.monotonic() + timeout
+
+        # Phase 1: wait for the temperature to settle at the target.
+        #   `band_entered`  -- when the temperature first came into range
+        #   `band_first`    -- the temperature when it came into range
+        # Phase 2: the hold clock runs from `stable_since`.
+        #   `stable_since`  -- when the temperature was judged settled
+        band_entered: float | None = None
+        band_first: float | None = None
+        stable_since: float | None = None
+
+        while time.monotonic() < deadline:
+            st = self._state
+            temp = st.temperature
+            if temp is None:
+                time.sleep(poll_s)
+                continue
+
+            now = time.monotonic()
+
+            if abs(temp - target_c) > tolerance_c:
+                # Outside the band: everything resets.
+                if stable_since is not None:
+                    log.info(
+                        "left the %.2f C band (now %.2f C); hold timer reset",
+                        target_c, temp,
+                    )
+                band_entered = None
+                band_first = None
+                stable_since = None
+                time.sleep(poll_s)
+                continue
+
+            # Inside the band.
+            if band_entered is None:
+                band_entered = now
+                band_first = temp
+
+            if stable_since is None:
+                # Still settling: has the temperature stopped moving?
+                #
+                # The reported rate is the strongest signal: when the
+                # programmer has reached the limit it reports no rate (or
+                # zero), which means it is holding.  When it does not
+                # report a rate, fall back to comparing the measured
+                # movement against what the ramp *would* have produced.
+                rate = st.rate
+                if rate is not None:
+                    # The programmer reports its rate; at the limit it
+                    # reports no rate (or zero), which means it is
+                    # holding.
+                    still_moving = abs(rate) > 0.01
+                else:
+                    # No rate reported: fall back to comparing the
+                    # measured movement against a fixed threshold.
+                    drift = abs(temp - band_first)
+                    still_moving = drift > self.MAX_HOLD_DRIFT_C
+
+                if still_moving:
+                    # Still ramping through the band -- restart the
+                    # settling window.
+                    band_entered = now
+                    band_first = temp
+                elif now - band_entered >= settle_s:
+                    stable_since = now
+                    log.info(
+                        "settled at %.2f C (target %.2f C); holding for %.0f s",
+                        temp, target_c, duration_s,
+                    )
+            else:
+                if now - stable_since >= duration_s:
+                    return temp
+
+            time.sleep(poll_s)
+
+        raise TimeoutError(
+            f"temperature did not settle within {tolerance_c} C of "
+            f"{target_c} C and stay there for {duration_s}s within {timeout}s"
+        )
+
+    #: Largest temperature excursion (in degrees Celsius) allowed during
+    #: the settling window before the temperature is considered to still
+    #: be moving towards the target.  Only used when the programmer does
+    #: not report a rate.
+    MAX_HOLD_DRIFT_C = 0.05
+
     # -- diagnostics ------------------------------------------------------ #
     #: Baud rates to try, in the order suggested by the vendor's own
     #: firmware tool (Instrument Updater/CHIPDEF.INI lists 4800, 9600,
@@ -793,7 +937,7 @@ class HidProgrammer(LinkamProgrammer):
         self,
         node: str | None = None,
         *,
-        framing: str = "raw",
+        framing: str = "text_padded",
         report_size: int | None = None,
         input_report_id: int | None = None,
         output_report_id: int | None = None,

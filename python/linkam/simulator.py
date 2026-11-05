@@ -57,6 +57,9 @@ class SimulatedProgrammer(LinkamProgrammer):
         self.limit: float | None = None
         self.hold_s = 0.0
         self.hold_remaining = 0.0
+        #: Set once the programmed hold has run to completion, so the
+        #: simulator does not start it again on the next tick.
+        self._hold_done = False
         self.ramp_row = 0
         self.running = False
         self.mode = "standby"          # standby | heating | cooling | holding
@@ -104,6 +107,9 @@ class SimulatedProgrammer(LinkamProgrammer):
                 self.limit = float(kv["limit"])
             if "time" in kv:
                 self.hold_s = float(kv["time"])
+            # A new programme means a new hold.
+            self._hold_done = False
+            self.hold_remaining = 0.0
         elif low.startswith("prog rate"):
             self.rate = float(parts[2])
         elif low.startswith("prog limit"):
@@ -115,6 +121,8 @@ class SimulatedProgrammer(LinkamProgrammer):
         elif low.startswith("prog start"):
             self.running = True
             self.mode = "standby"
+            self._hold_done = False
+            self.hold_remaining = 0.0
         elif low.startswith("prog stop"):
             self.running = False
             self.mode = "standby"
@@ -143,15 +151,31 @@ class SimulatedProgrammer(LinkamProgrammer):
             self.temp_c += (self.ambient_c - self.temp_c) * 0.02
             return
 
-        if self.mode == "standby" and self.limit is not None:
-            # ramp towards the limit at the programmed rate
-            if self.temp_c < self.limit - 0.05:
-                self.mode = "heating"
-            elif self.temp_c > self.limit + 0.05:
-                self.mode = "cooling"
-            else:
-                self.mode = "holding"
-                self.hold_remaining = self.hold_s
+        if self.mode in ("standby", "heating", "cooling"):
+            # Decide which way to go, and notice when the limit has been
+            # reached.
+            #
+            # The limit check must happen here rather than only in
+            # "standby": once the mode has become "heating" it stays
+            # there, so a transition tested only in standby would never
+            # fire and the ramp would sit at the limit forever instead
+            # of starting the hold countdown.
+            if self.limit is not None:
+                if self.temp_c < self.limit - 0.05:
+                    self.mode = "heating"
+                elif self.temp_c > self.limit + 0.05:
+                    self.mode = "cooling"
+                elif self.hold_remaining > 0 or self.mode == "holding":
+                    # Already at the limit and already holding.
+                    pass
+                elif self._hold_done:
+                    # The hold has already run to completion; do not start
+                    # it again.
+                    pass
+                else:
+                    # At the limit: hold, and count the hold down.
+                    self.mode = "holding"
+                    self.hold_remaining = self.hold_s
 
         if self.mode in ("heating", "cooling"):
             rate_per_tick = self.rate / 60.0 * TELEMETRY_PERIOD_S
@@ -170,6 +194,7 @@ class SimulatedProgrammer(LinkamProgrammer):
             if self.hold_remaining <= 0.0 and self.hold_s > 0:
                 self.mode = "standby"
                 self.rate = 0.0
+                self._hold_done = True
 
     def _telemetry_string(self) -> str:
         t = self.temp_c

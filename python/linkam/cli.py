@@ -227,7 +227,7 @@ def main(argv=None) -> int:
                    help="probe the USB HID link (Linkam T95)")
     p.add_argument("--hid-node", default=None,
                    help="explicit hidraw node, e.g. /dev/hidraw1")
-    p.add_argument("--hid-framing", default="raw",
+    p.add_argument("--hid-framing", default="text_padded",
                    choices=["raw", "id_text", "text_padded", "length_prefixed"],
                    help="HID report framing to use")
     p.add_argument("--hid-report-size", type=int, default=None,
@@ -243,7 +243,7 @@ def main(argv=None) -> int:
                    help="use the USB HID link (Linkam T95)")
     r.add_argument("--hid-node", default=None,
                    help="explicit hidraw node, e.g. /dev/hidraw1")
-    r.add_argument("--hid-framing", default="raw",
+    r.add_argument("--hid-framing", default="text_padded",
                    choices=["raw", "id_text", "text_padded", "length_prefixed"],
                    help="HID report framing to use")
     r.add_argument("--hid-report-size", type=int, default=None,

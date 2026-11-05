@@ -5,6 +5,7 @@ writing, ramp sequencing) without any hardware.
 """
 
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -75,19 +76,47 @@ class FakeProgrammer(LinkamProgrammer):
         elif self.temp > target:
             self.temp = max(target, self.temp - rate_per_tick)
 
+    def _emit(self):
+        """Emit one telemetry frame and absorb it."""
+        tlm = parse_telemetry(
+            f"Temp {self.temp:.2f} °C~Rate {self.rate:.1f} °C/min"
+            f"~Limit {self.limit:.2f} °C"
+        )
+        self._absorb(tlm)
+        for cb in list(self._listeners):
+            cb(tlm)
+
     def wait_for_temperature(self, target_c, tolerance_c=0.5, timeout=3600.0,
                              *, stall_timeout=None, min_progress_c=0.2):
         """Simulate the ramp, emitting telemetry as we go."""
         while abs(self.temp - target_c) > tolerance_c:
             self._step()
-            tlm = parse_telemetry(
-                f"Temp {self.temp:.2f} °C~Rate {self.rate:.1f} °C/min"
-                f"~Limit {self.limit:.2f} °C"
-            )
-            self._absorb(tlm)
-            for cb in list(self._listeners):
-                cb(tlm)
+            self._emit()
+        self._emit()
         return self.temp
+
+    def wait_for_stable_temperature(self, target_c, duration_s, *,
+                                    tolerance_c=0.5, settle_s=1.0,
+                                    timeout=None, poll_s=0.1):
+        """Simulate holding at the target, emitting telemetry as we go.
+
+        The real implementation measures the hold from the telemetry, so
+        the fake has to keep producing frames at the target for the hold
+        to be observed.
+        """
+        deadline = time.monotonic() + (timeout or (duration_s + 60.0))
+        stable_since = None
+        while time.monotonic() < deadline:
+            self._emit()
+            if abs(self.temp - target_c) <= tolerance_c:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= duration_s:
+                    return self.temp
+            else:
+                stable_since = None
+            time.sleep(poll_s)
+        raise TimeoutError("fake hold did not settle")
 
 
 class FakeVideo:

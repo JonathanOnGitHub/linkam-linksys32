@@ -84,7 +84,7 @@ class Experiment:
     #: "discover the T95 automatically".
     hid_node: str | None = None
     #: HID report framing; see :mod:`linkam.hid`.
-    hid_framing: str = "raw"
+    hid_framing: str = "text_padded"
     #: Output report size in bytes; ``None`` means "discover it".
     hid_report_size: int | None = None
     video_backend: str = "auto"
@@ -106,6 +106,10 @@ class Experiment:
     #: Smallest temperature change that counts as progress toward the
     #: target.  Should exceed the sensor noise.
     min_progress_c: float = 0.2
+    #: How close to the target the temperature must be for the hold to
+    #: count as "at temperature".  This is the band within which the
+    #: temperature is considered stable.
+    stable_tolerance_c: float = 0.5
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
@@ -317,11 +321,25 @@ class IsothermalRun:
                 min_progress_c=self.exp.min_progress_c,
             )
 
-            # 3. optional hold
+            # 3. hold at the target
+            #
+            # The hardware runs the hold itself: the compound command
+            # above included `time <hold_s>`, so the programmer ramps to
+            # the limit and then holds there for that long on its own.
+            #
+            # The host therefore does *not* sleep for `hold_s` and then
+            # stop -- that would double-count the hold and, worse, would
+            # cut the real hold short whenever the tolerance check above
+            # returned late.  Instead we wait until the measured
+            # temperature has been *stable* at the target for `hold_s`,
+            # which is what "hold at temperature" means physically, and
+            # works whether or not the hardware honours its own `time`.
             if self.exp.hold_s:
-                deadline = time.monotonic() + self.exp.hold_s
-                while time.monotonic() < deadline and not self._stop.is_set():
-                    time.sleep(0.1)
+                prog.wait_for_stable_temperature(
+                    self.exp.target_c,
+                    duration_s=self.exp.hold_s,
+                    tolerance_c=self.exp.stable_tolerance_c,
+                )
                 prog.stop()
 
             elif self.exp.hold_forever:

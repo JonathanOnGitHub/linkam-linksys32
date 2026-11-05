@@ -355,20 +355,100 @@ earlier RS-232-centric analysis in this document still applies to the
 *application layer* (the command keywords, the telemetry format and the
 semantics of Rate/Limit/Hold), but the *framing* is different.
 
-### 5.1 What was observed directly
+### 5.1 The HID report descriptor (RETRIEVED)
 
-* The device is **silent until prompted**.  A 30 s passive listen on the
+The report descriptor was read successfully from the device with
+`HIDIOCGRDESC`.  It is 29 bytes:
+
+```
+06 a0 ff   Usage Page (0xFFA0)          -- Linkam vendor page
+09 01      Usage (0x01)
+a1 01      Collection (Application)
+09 01      Usage (0x01)
+15 00      Logical Minimum (0)
+26 ff 00   Logical Maximum (255)
+75 08      Report Size (8)
+95 3f      Report Count (63)              -- 63 bytes
+81 82      Input  (Data, Var, Abs)
+09 02      Usage (0x02)
+75 08      Report Size (8)
+95 3f      Report Count (63)              -- 63 bytes
+91 82      Output (Data, Var, Abs)
+c0         End Collection
+```
+
+Decoded, that means:
+
+| Property | Value |
+|---|---|
+| Usage page | `0xFFA0` (Linkam vendor-defined) |
+| Collections | 1 (Application) |
+| INPUT report | usage `0x01`, 63 bytes, **no report ID** |
+| OUTPUT report | usage `0x02`, 63 bytes, **no report ID** |
+
+So the T95 uses **no report IDs** and a **63-byte payload** in each
+direction.  The framing is therefore "ASCII at byte 0, zero-padded to
+63" — the `text_padded` framing in `linkam/hid.py`.
+
+Other USB details from `lsusb -v`:
+
+* One interface, HID 1.10, `bNumDescriptors` 1.
+* EP 1 IN: interrupt, 64-byte max packet, `bInterval` 1.
+* EP 1 OUT: interrupt, 64-byte max packet, `bInterval` 1.
+* `bmAttributes` 0xc0 — **self powered**, `MaxPower` 100 mA.
+* `bcdUSB` 2.00.
+
+### 5.2 Getting the descriptor out: an ioctl bug worth recording
+
+`HIDIOCGRDESC` initially failed with `EINVAL` on every attempt.  The
+cause was **not** a driver conflict (as first assumed) but the ioctl
+request number.
+
+The kernel's `hidraw_report_descriptor` handler is reached through
+`_IOC(dir, type, nr, size)`, and the layout from
+`<asm-generic/ioctl.h>` is:
+
+```
+_IOC(dir, type, nr, size) = (dir << 30) | (size << 16) | (type << 8) | nr
+```
+
+The first implementation used the wrong shift for the size field
+(`size << 14` instead of `size << 16`), so the encoded size was 1
+instead of 4100 and the kernel rejected every call.  With the shifts
+correct and the size set to `sizeof(struct hidraw_report_descriptor)`
+(4 + 4096 = 4100), the descriptor comes back immediately.
+
+This is worth recording because the symptom — `EINVAL` from
+`HIDIOCGRDESC` — looks exactly like "another driver owns the
+interface", which sent the investigation down the wrong path for a
+while.
+
+### 5.3 What was observed directly
+
+* The device is **silent until prompted**.  A 20 s passive listen on the
   hidraw node produced **zero** unsolicited input frames.
 * hidraw output reports are accepted at lengths 2, 4, 8, 16, 32 and 64.
   A **1-byte** output report is rejected with `EINVAL`.
 * `HIDIOCSINPUT` and `HIDIOCSFEATURE` both fail with `EPIPE` — the device
   implements neither.
-* `HIDIOCGRDESC` fails with `EINVAL` while `usbhid` holds interface 0.
-  `lsusb -v` correspondingly reports `Report Descriptors: ** UNAVAILABLE **`.
-  This is *not* yet proof that the device has no report descriptor; the
-  ioctl may simply be refused because another driver owns the interface.
+* `HIDIOCGRAWNAME` -> `Linkam T95`; `HIDIOCGRAWUNIQ` -> `1234`;
+  `HIDIOCGRAWINFO` -> vendor `0x16da`, product `0x0002`.
 
-### 5.2 The architectural consequence
+### 5.4 The OUT endpoint stops responding
+
+After the first few writes, **every** write to the OUT endpoint began
+failing with `ETIMEDOUT` — including plain zero-filled reports of every
+size, and including via the `HIDIOCSOUTPUT` ioctl as well as `write()`.
+Reads still returned no data, and the device's descriptors still read
+correctly, so it was still enumerated and healthy.
+
+This is **not** a framing problem: a wrong payload would be *accepted*
+and ignored, not time out.  It means the firmware had stopped servicing
+the endpoint.  Recovering requires either a power cycle of the stage
+(off, wait, on) plus a USB replug, or a `USBDEVFS_RESET` on the USB
+device (which needs root — see `tools/reset_usb_device.sh`).
+
+### 5.5 The architectural consequence
 
 The application layer recovered in §1 is **line-oriented ASCII text**:
 `LinksysActXLib.ocx` reads replies with VB's `__vbaLineInputStr`, and
@@ -384,7 +464,7 @@ implements the RS-232 side, and `linkam/hid.py:HidTransport` implements
 the HID side.  `LinkamProgrammer` and `HidProgrammer` share every line
 of ramp logic, stall detection and telemetry parsing.
 
-### 5.3 Candidate report framings
+### 5.6 Candidate report framings
 
 Until the real framing is observed, four candidates are supported:
 
@@ -395,22 +475,37 @@ Until the real framing is observed, four candidates are supported:
 | `text_padded` | ASCII at byte 0 of a report with no report ID, zero-padded |
 | `length_prefixed` | a length byte (or 16-bit length) then that many ASCII bytes |
 
+Because the T95 has **no report IDs** (§5.1), `text_padded` is the
+leading candidate and is now the default in `linkam/hid.py`,
+`linkam/protocol.py` and the CLI.
+
 `tools/t95_hid_probe.py` tries each and reports which one answers.  It
 sends only `MA6`, which reads a stage register and changes nothing.
 
-### 5.4 Still UNVERIFIED for the T95
+### 5.7 Still UNVERIFIED for the T95
 
-1. The actual report framing (see §5.3).
-2. Whether the T95 uses report IDs at all.
-3. The output report length it expects.
-4. Whether the telemetry is pushed periodically (as on the serial link)
-   or only in response to a query.
+**Resolved since the descriptor was read:**
+
+2. ~~Whether the T95 uses report IDs at all.~~  **No** — the descriptor
+   defines one input and one output report, neither with a report ID.
+3. ~~The output report length it expects.~~  **63 bytes**, from the
+   descriptor's Report Count.
+
+**Still open:**
+
+1. The application-level encoding inside the 63-byte report.  The
+   descriptor fixes the *shape* but not the *content* format: it could
+   be the same ASCII text as the serial link, or a binary command
+   structure.  The framing candidates in §5.6 are the ASCII options.
+4. Whether the telemetry is pushed periodically (as on the serial link,
+   every 0.2977 s) or only in response to a query.  So far the device
+   has been completely silent, including during a 20 s passive listen.
 5. Whether the command terminator (CR / LF / CRLF) still applies inside
    the HID payload.
 6. Whether the T95 supports the same command vocabulary as the older
    RS-232 programmers, or a subset.
 
-### 5.5 Note on the telemetry encoding
+### 5.8 Note on the telemetry encoding
 
 The telemetry contains `°C` — a **degree sign**, which is UTF-8
 (`0xC2 0xB0`), not ASCII.  Decoding HID payloads as ASCII with

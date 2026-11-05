@@ -5,26 +5,42 @@ The T95 is a **USB HID** device, not a serial port.  It enumerates as
 ``hid-generic`` to it).  This is why the legacy Linksys32 code, which is
 built around pyserial, cannot talk to it at all.
 
-What is known
--------------
+What is now known
+-----------------
 
 * USB vendor/product: ``16da:0002`` ("Linkam T95").
 * Two interrupt endpoints; 64-byte IN reports; ``bInterval`` 1.
 * The device is **silent until prompted** -- a 30 s passive listen produced
   no unsolicited input frames at all.
-* hidraw output reports accept lengths 2, 4, 8, 16, 32 and 64 (a 1-byte
-  output report is rejected with ``EINVAL``).
+* hidraw output reports accept lengths 2, 4, 8, 16, 32 and 64.
+  A **1-byte** output report is rejected with ``EINVAL``.
 * ``HIDIOCGRAWNAME`` -> ``Linkam T95``; ``HIDIOCGRAWUNIQ`` -> ``1234``;
   ``HIDIOCGRAWINFO`` -> vendor ``0x16da``, product ``0x0002``.
 
-What is *not* yet known
------------------------
+The HID report descriptor
+-------------------------
 
-The exact report envelope is not established: report IDs, payload offsets,
-whether the ASCII line is at offset 0 or after a header, and whether the
-device expects a terminator at all.  Rather than guess, this module
-**discovers** as much as it can at runtime and supports several candidate
-framings, selectable explicitly.
+Retrieved from the device with ``HIDIOCGRDESC`` (29 bytes)::
+
+    06 a0 ff   Usage Page (0xFFA0)         -- Linkam vendor page
+    09 01      Usage (0x01)
+    a1 01      Collection (Application)
+    09 01      Usage (0x01)
+    15 00      Logical Minimum (0)
+    26 ff 00   Logical Maximum (255)
+    75 08      Report Size (8)
+    95 3f      Report Count (63)             -- 63 bytes
+    81 82      Input  (Data, Var, Abs)
+    09 02      Usage (0x02)
+    75 08      Report Size (8)
+    95 3f      Report Count (63)             -- 63 bytes
+    91 82      Output (Data, Var, Abs)
+    c0         End Collection
+
+So the T95 has **no report IDs** and a **63-byte payload** in each
+direction: one vendor-defined INPUT report and one vendor-defined
+OUTPUT report.  The application-layer ASCII is carried in those bytes,
+padded out to 63.
 
 Design
 ------
@@ -105,15 +121,22 @@ FRAMINGS = ("raw", "id_text", "text_padded", "length_prefixed")
 # ioctl helpers
 # --------------------------------------------------------------------------- #
 
+# The Linux ioctl request-number layout, from
+# ``<asm-generic/ioctl.h>``::
+#
+#     _IOC(dir,type,nr,size) = (dir << 30) | (size << 16) | (type << 8) | nr
+#
+# so: nr occupies bits 0-7, type bits 8-15, size bits 16-29 and the
+# direction bits 30-31.
 _IOC_NRBITS = 8
 _IOC_TYPEBITS = 8
 _IOC_SIZEBITS = 14
 _IOC_DIRBITS = 2
 
 _IOC_NRSHIFT = 0
-_IOC_TYPESHIFT = _IOC_NRSHIFT + _IOC_NRBITS
-_IOC_SIZESHIFT = _IOC_TYPESHIFT + _IOC_TYPEBITS
-_IOC_DIRSHIFT = _IOC_SIZESHIFT + _IOC_SIZEBITS
+_IOC_TYPESHIFT = _IOC_NRSHIFT + _IOC_NRBITS          # 8
+_IOC_SIZESHIFT = _IOC_TYPESHIFT + _IOC_TYPEBITS      # 16
+_IOC_DIRSHIFT = _IOC_SIZESHIFT + _IOC_SIZEBITS       # 30
 
 _IOC_NONE = 0
 _IOC_WRITE = 1
@@ -130,8 +153,25 @@ def _ioc(direction: int, type_: int, nr: int, size: int) -> int:
     )
 
 
+#: ``HID_MAX_DESCRIPTOR_SIZE`` from ``<linux/hid.h>``.
+HID_MAX_DESCRIPTOR_SIZE = 4096
+
 _HIDIOCGRDESCSIZE = _ioc(_IOC_READ, ord("H"), 0x01, 4)
-_HIDIOCGRDESC = _ioc(_IOC_READ, ord("H"), 0x02, 4 + 4096)
+
+#: ``HIDIOCGRDESC``.
+#:
+#: The size field must be ``sizeof(struct hidraw_report_descriptor)``,
+#: which is ``4 + HID_MAX_DESCRIPTOR_SIZE`` = 4100 bytes -- the ``__u32
+#: size`` member plus the ``__u8 value[4096]`` array.  The kernel's
+#: ``hidraw_report_descriptor`` handler copies the descriptor into that
+#: array and updates the leading ``size``.
+#:
+#: This ioctl is what makes the T95's report layout discoverable, so it
+#: is worth getting exactly right: the request number must encode the
+#: size as 4100 with the shifts from ``<asm-generic/ioctl.h>``, i.e.
+#: ``(dir << 30) | (size << 16) | (type << 8) | nr``.
+_HIDIOCGRDESC = _ioc(_IOC_READ, ord("H"), 0x02, 4 + HID_MAX_DESCRIPTOR_SIZE)
+
 _HIDIOCGRAWINFO = _ioc(_IOC_READ, ord("H"), 0x03, 8)
 _HIDIOCGRAWUNIQ = _ioc(_IOC_READ, ord("H"), 0x08, 256)
 
@@ -329,6 +369,16 @@ def array_u32_u16_u16(fd: int) -> tuple[int, int, int] | None:
 def read_report_descriptor(node: str) -> bytes:
     """Fetch the HID report descriptor via ``HIDIOCGRDESC``.
 
+    The buffer layout is ``struct hidraw_report_descriptor``::
+
+        __u32 size;
+        __u8  value[HID_MAX_DESCRIPTOR_SIZE];
+
+    but the ioctl size must be ``HID_MAX_DESCRIPTOR_SIZE`` (4096), not
+    ``sizeof(struct)`` (4100) -- the kernel rejects anything larger with
+    ``EINVAL``.  The descriptor bytes therefore start at offset 4 and run
+    to the end of the 4096-byte buffer.
+
     Returns an empty ``bytes`` if the descriptor is unavailable (some
     vendor-specific HID devices do not expose one, and the ioctl fails
     when another driver holds the interface).
@@ -343,15 +393,15 @@ def read_report_descriptor(node: str) -> bytes:
         except OSError:
             return b""
         size = size_buf[0]
-        if not (0 < size <= 4096):
+        if not (0 < size <= HID_MAX_DESCRIPTOR_SIZE):
             return b""
 
         # struct hidraw_report_descriptor { __u32 size; __u8 value[4096]; }
-        buf = array.array("B", [0] * (4 + 4096))
+        buf = array.array("B", [0] * (4 + HID_MAX_DESCRIPTOR_SIZE))
         struct.pack_into("<I", buf, 0, size)
         fcntl.ioctl(fd, _HIDIOCGRDESC, buf, True)
         out_size = struct.unpack_from("<I", buf, 0)[0]
-        if not (0 < out_size <= 4096):
+        if not (0 < out_size <= HID_MAX_DESCRIPTOR_SIZE):
             out_size = size
         return buf[4 : 4 + out_size].tobytes()
     except OSError as exc:
@@ -385,13 +435,24 @@ class HidTransport:
         ``None`` means "accept any".
     output_report_id:
         Report ID to put in the first byte of output reports, if used.
+
+    Notes
+    -----
+    The T95's report descriptor gives a payload of **63 bytes** in each
+    direction, with **no report IDs**.  The default framing is therefore
+    ``text_padded``: the ASCII payload starts at byte 0 and the rest of
+    the report is zero padding.
     """
+
+    #: Payload size of the T95's input and output reports, from its HID
+    #: report descriptor (Report Count 63, Report Size 8).
+    T95_REPORT_SIZE = 63
 
     def __init__(
         self,
         node: str | None = None,
         *,
-        framing: str = "raw",
+        framing: str = "text_padded",
         report_size: int | None = None,
         input_report_id: int | None = None,
         output_report_id: int | None = None,
@@ -441,10 +502,50 @@ class HidTransport:
         log.info("opened %s", self._node)
 
         if self._out_size is None:
-            self._out_size = self._discover_output_size()
+            self._out_size = self._determine_output_size()
 
         # Clear any stale state.
         self._buf.clear()
+
+    def _determine_output_size(self) -> int:
+        """Work out how long an output report should be.
+
+        The report descriptor is the authoritative answer, so read it
+        first.  That avoids probing, which would mean *writing* to the
+        device -- something best avoided when merely opening it.
+
+        If the descriptor cannot be read (some vendor-specific devices do
+        not expose one, and the ioctl fails when another driver holds the
+        interface), fall back to probing.
+        """
+        descriptor = read_report_descriptor(self._node)
+        if descriptor:
+            try:
+                from .hid_descriptor import ReportDescriptorParser, report_sizes
+
+                parser = ReportDescriptorParser()
+                parser.parse(descriptor)
+                sizes = report_sizes(parser)
+                out_size = sizes.get("OUTPUT")
+                if out_size:
+                    log.info(
+                        "output report size: %d bytes (from the report descriptor)",
+                        out_size,
+                    )
+                    return out_size
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("could not derive the report size: %s", exc)
+
+        if self.vendor == T95_VID and self.product == T95_PID:
+            # The T95's descriptor says 63 bytes; use that if we could
+            # not read it just now.
+            log.info(
+                "output report size: %d bytes (known T95 value)",
+                self.T95_REPORT_SIZE,
+            )
+            return self.T95_REPORT_SIZE
+
+        return self._discover_output_size()
 
     def close(self) -> None:
         if self._fd is not None:
@@ -462,15 +563,22 @@ class HidTransport:
         self.close()
 
     # -- output size discovery -------------------------------------------- #
+    #: Output report lengths to try, smallest first.
+    #:
+    #: 1 is excluded on purpose: the T95 rejects 1-byte output reports
+    #: with ``EINVAL``.
+    PROBE_SIZES = (2, 4, 8, 16, 32, 63, 64)
+
     def _discover_output_size(self) -> int:
         """Find the smallest output report the device accepts.
 
-        The T95 rejects 1-byte output reports with ``EINVAL`` and accepts
-        2, 4, 8, 16, 32 and 64.  We probe with a harmless zero-filled
-        report and remember the smallest size that works; that is the
-        natural report length.
+        Used only for devices whose report descriptor is unavailable.
+        The T95's descriptor *is* available and states the size, so the
+        transport does not probe it -- probing means writing to the
+        instrument, and on this device a write it does not like can wedge
+        the OUT endpoint.
         """
-        for size in (2, 4, 8, 16, 32, 64):
+        for size in self.PROBE_SIZES:
             if self._try_output_size(size):
                 log.info("output report size: %d bytes", size)
                 return size
@@ -495,6 +603,78 @@ class HidTransport:
                 return False
             raise
         return True
+
+    def probe_output_size(
+        self,
+        sizes: Iterable[int] | None = None,
+        *,
+        baseline: int = 2,
+    ) -> tuple[int | None, list[dict]]:
+        """Safely find the largest output report length the device accepts.
+
+        Why not just use the descriptor
+        --------------------------------
+        The T95's report descriptor says its Output report is 63 bytes,
+        but on real hardware a 63-byte output write times out
+        (``ETIMEDOUT``) and leaves the OUT endpoint refusing further
+        writes.  So the descriptor and the firmware disagree, and the
+        only way to find out what the firmware will actually take is to
+        ask it.
+
+        Why this is safe
+        ----------------
+        A NAK on this device appears to be *sticky*: once a write has
+        timed out, even writes that previously succeeded time out too.
+        So the probe:
+
+        * ascends, smallest first, so the sizes known to work are tried
+          before the ones that might not;
+        * stops at the first failure rather than pushing on;
+        * re-checks liveness with a `baseline`-sized write after a
+          failure, so the caller can tell "that size is rejected" from
+          "the device has stopped talking to us entirely".
+
+        The probe payload is all zeros at every size, so it cannot spell
+        a command and cannot start a ramp.
+
+        Returns
+        -------
+        (best_size, results)
+            ``best_size`` is the largest size that was accepted, or
+            ``None`` if nothing worked.  ``results`` is one record per
+            size tried, for reporting.
+        """
+        if self._fd is None:
+            raise ConnectionError("hidraw device is not open")
+
+        sizes = list(sizes) if sizes is not None else list(self.PROBE_SIZES)
+        results: list[dict] = []
+        best: int | None = None
+
+        for size in sizes:
+            entry = {"size": size, "ok": False, "error": None, "alive_after": None}
+            payload = self._build_output("", size=size)
+            try:
+                os.write(self._fd, payload)
+                entry["ok"] = True
+                best = size
+            except OSError as exc:
+                entry["error"] = errno.errorcode.get(exc.errno, str(exc.errno))
+                # Did the device survive the rejection?  A `baseline`
+                # write tells us whether the endpoint is still usable.
+                try:
+                    os.write(self._fd, self._build_output("", size=baseline))
+                    entry["alive_after"] = True
+                except OSError as exc2:
+                    entry["alive_after"] = False
+                    entry["alive_error"] = errno.errorcode.get(
+                        exc2.errno, str(exc2.errno)
+                    )
+            results.append(entry)
+            if not entry["ok"]:
+                break
+
+        return best, results
 
     # -- framing ---------------------------------------------------------- #
     def _build_output(self, text: str, *, size: int | None = None) -> bytes:
@@ -523,8 +703,23 @@ class HidTransport:
             raise ValueError(self.framing)
 
         if len(out) > size:
-            log.debug("command truncated to fit %d-byte report", size)
-            out = out[:size]
+            # Never silently truncate a command.  A truncated command is
+            # not a harmless error: the instrument may read it as a
+            # *different, valid* command.  `prog ramp 1 rate 5 limit 95
+            # time 60` cut short at "limit 9" is a request to hold at
+            # 9 degrees, and nothing would report the discrepancy.
+            #
+            # This is not hypothetical: an earlier version of this
+            # transport discovered the output report size by probing,
+            # found that a 2-byte write was accepted, and then truncated
+            # every command to 2 bytes.  The framing probe dutifully
+            # sent the two bytes "MA" to the instrument and reported
+            # "NO RESPONSE under any framing" -- a puzzle that had
+            # nothing to do with the framing.
+            raise CommandTooLong(
+                f"command of {len(out)} bytes does not fit in the device's "
+                f"{size}-byte output report"
+            )
         out += bytes(size - len(out))
         return bytes(out)
 
@@ -554,7 +749,20 @@ class HidTransport:
             raise ConnectionError("hidraw device is not open")
         payload = self._build_output(text + terminator.decode("ascii", "replace"))
         log.debug("-> %r", payload)
-        os.write(self._fd, payload)
+        try:
+            os.write(self._fd, payload)
+        except OSError as exc:
+            if exc.errno == errno.ETIMEDOUT:
+                raise ConnectionError(
+                    "the T95 did not accept the output report "
+                    "(ETIMEDOUT): the device is enumerated and its report "
+                    "descriptor reads correctly, but it is not servicing its "
+                    "OUT endpoint. This is not a framing problem. Power-cycle "
+                    "the stage (off, wait 10 s, on) and replug the USB cable; "
+                    "if it persists, reset the USB device with "
+                    "'sudo ./tools/reset_usb_device.sh'."
+                ) from exc
+            raise
 
     def read_line(self, timeout: float) -> str:
         if self._fd is None:
