@@ -15,42 +15,37 @@ import struct
 import pytest
 
 from linkam.protocol import HidProgrammer, ProtocolError
-from linkam.t95 import T95_REPORT_SIZE
+from linkam.t95 import BLOCK_SIZE, REPLY_SIZE, Cmd, MultiCommand
 
 
 def make_block_for_test(
-    kind: int,
+    index: int,
     *,
     temperature=None,
     sensor2=None,
     rate=None,
-    limit=None,
-    flags=None,
-    marker=None,
+    setpoint=None,
 ) -> bytes:
     """Build a status block the way the instrument does."""
-    block = bytearray(T95_REPORT_SIZE)
-    block[0] = kind
+    block = bytearray(REPLY_SIZE)
+    block[0] = index
     block[1] = 0x03
+    struct.pack_into("<HHHH", block, 2, Cmd.GETLINK, 136, 0, 0)
     if temperature is not None:
         struct.pack_into("<f", block, 10, temperature)
     if sensor2 is not None:
         struct.pack_into("<f", block, 14, sensor2)
     if rate is not None:
         struct.pack_into("<f", block, 18, rate)
-    if limit is not None:
-        struct.pack_into("<f", block, 22, limit)
-    if flags is not None:
-        block[34] = flags
-    if marker is not None:
-        block[51] = marker
+    if setpoint is not None:
+        struct.pack_into("<f", block, 22, setpoint)
     return bytes(block)
 
 
 class FakeBinaryTransport:
     """A transport that speaks the T95's binary protocol.
 
-    Records the reports written and serves a canned answer.
+    Records the blocks written and serves a canned answer.
     """
 
     def __init__(self, blocks=None):
@@ -64,8 +59,8 @@ class FakeBinaryTransport:
     def close(self):
         pass
 
-    def write_report(self, payload):
-        self.written.append(payload)
+    def write_blocks(self, frames):
+        self.written.extend(frames)
 
     def read_reports(self, count, timeout=1.0):
         out = self.blocks[:count]
@@ -90,14 +85,17 @@ def test_poll_status_writes_a_status_poll():
     prog.poll_status()
     assert len(prog._transport.written) == 1
     frame = prog._transport.written[0]
-    assert len(frame) == T95_REPORT_SIZE
-    assert frame[0] == frame[1], "the device only accepts equal first bytes"
+    assert len(frame) == BLOCK_SIZE
+    assert frame[0] == 0x00, "byte 0 is reserved"
+    assert frame[1] == 1, "byte 1 is the block index"
+    assert frame[2] == 1, "byte 2 is the block count"
+    assert struct.unpack_from("<H", frame, 3)[0] == Cmd.GETLINK
 
 
 def test_poll_status_parses_the_answer():
     prog = make_programmer([
         make_block_for_test(1, temperature=23.6406),
-        make_block_for_test(2, flags=1, marker=0x48),
+        make_block_for_test(2),
         make_block_for_test(3),
     ])
     status = prog.poll_status()
@@ -182,7 +180,7 @@ def test_telemetry_callbacks_receive_the_temperature():
 
 def test_state_is_updated_from_the_status():
     prog = make_programmer([
-        make_block_for_test(1, temperature=21.5, rate=0.7, limit=0.35),
+        make_block_for_test(1, temperature=21.5, rate=0.7, setpoint=0.35),
         make_block_for_test(2),
         make_block_for_test(3),
     ])
@@ -198,3 +196,92 @@ def test_a_floated_temperature_round_trips():
         make_block_for_test(3),
     ])
     assert prog.read_temperature() == pytest.approx(-19.125, abs=1e-3)
+
+
+# --------------------------------------------------------------------------- #
+# setting the temperature
+# --------------------------------------------------------------------------- #
+
+
+def test_set_limit_arms_the_setpoint():
+    """``set_limit`` sends SETMULT carrying SETLIMIT."""
+    prog = make_programmer([])
+    prog.set_limit(95.0)
+    written = prog._transport.written
+    assert len(written) == 2, "a MultiCommand payload needs two blocks"
+
+    command, length, _, _ = struct.unpack_from("<HHHH", written[0], 3)
+    assert command == Cmd.SETMULT
+    assert length == 96
+
+    raw = written[0][11:63] + written[1][3:63]
+    multi = MultiCommand.from_bytes(raw[:96])
+    assert multi.entries == [(Cmd.MULTI_SETLIMIT, 95.0)]
+
+
+def test_set_rate_arms_the_rate():
+    prog = make_programmer([])
+    prog.set_rate(2.0)
+    written = prog._transport.written
+    raw = written[0][11:63] + written[1][3:63]
+    multi = MultiCommand.from_bytes(raw[:96])
+    assert multi.entries == [(Cmd.MULTI_SETRATE, 2.0)]
+
+
+def test_start_programs_and_starts_in_one_command():
+    prog = make_programmer([])
+    prog.start(rate=2.0, setpoint=95.0)
+    written = prog._transport.written
+    assert len(written) == 2
+    raw = written[0][11:63] + written[1][3:63]
+    multi = MultiCommand.from_bytes(raw[:96])
+    assert multi.entries == [
+        (Cmd.MULTI_SETRATE, 2.0),
+        (Cmd.MULTI_SETLIMIT, 95.0),
+        (Cmd.MULTI_START, 0.0),
+    ]
+
+
+def test_stop_sends_setstop():
+    prog = make_programmer([])
+    prog.stop()
+    written = prog._transport.written
+    assert len(written) == 1
+    command, length, _, _ = struct.unpack_from("<HHHH", written[0], 3)
+    assert command == Cmd.SETSTOP
+    assert length == 0
+
+
+def test_the_ascii_commands_are_not_used_on_this_link():
+    """The inherited ASCII methods must not be what drives the T95."""
+    prog = make_programmer([])
+    prog.set_limit(95.0)
+    written = b"".join(prog._transport.written)
+    assert b"prog" not in written.lower()
+    assert b"limit 95" not in written.lower()
+
+
+def test_start_without_arguments_uses_the_armed_values():
+    """A bare start is still a MultiCommand, never a raw sub-command id."""
+    prog = make_programmer([])
+    prog.start()
+    written = prog._transport.written
+    command, _, _, _ = struct.unpack_from("<HHHH", written[0], 3)
+    assert command == Cmd.SETMULT
+    raw = written[0][11:63] + written[1][3:63]
+    multi = MultiCommand.from_bytes(raw[:96])
+    assert multi.entries == [(Cmd.MULTI_START, 0.0)]
+
+
+def test_programme_ramp_sends_rate_limit_time_and_start_together():
+    prog = make_programmer([])
+    prog.programme_ramp(1, rate=2.0, limit=95.0, time_s=600.0)
+    written = prog._transport.written
+    raw = written[0][11:63] + written[1][3:63]
+    multi = MultiCommand.from_bytes(raw[:96])
+    assert multi.entries == [
+        (Cmd.MULTI_SETRATE, 2.0),
+        (Cmd.MULTI_SETLIMIT, 95.0),
+        (Cmd.MULTI_SETTIME, 600.0),
+        (Cmd.MULTI_START, 0.0),
+    ]

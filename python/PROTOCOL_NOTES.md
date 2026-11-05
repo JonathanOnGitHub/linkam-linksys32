@@ -448,17 +448,17 @@ the endpoint.  Recovering requires either a power cycle of the stage
 (off, wait, on) plus a USB replug, or a `USBDEVFS_RESET` on the USB
 device (which needs root — see `tools/reset_usb_device.sh`).
 
-### 5.5 The application layer is BINARY, not ASCII
+### 5.5 The application layer is BINARY, not ASCII — CONFIRMED
 
-The hypothesis in the previous revision of this document — that the T95
+The hypothesis in an earlier revision of this document — that the T95
 carries the *same ASCII strings* as the RS-232 link inside its HID
 reports — is **refuted**.  The T95 speaks a binary block protocol.
 
 The evidence:
 
 * The device's answer is not text.  It is three 63-byte blocks whose
-  first byte is a type (1, 2, 3) and which carry **little-endian
-  float32** values, not ASCII.
+  first byte is the block index (1, 2, 3) and which carry
+  **little-endian float32** values, not ASCII.
 * Not one ASCII command has any effect.  `Prog rate 5`, `Prog Limit 30`,
   `Prog stop`, `prog ramp 1 rate 5 limit 30 time 60`, `MA6`, `MC`,
   `MF1`, `MSX`, `MVX` and `prog` were each sent, in a dozen different
@@ -466,133 +466,249 @@ The evidence:
   length duplicated, ASCII at four different offsets).  None produced an
   acknowledgement, and none changed a single field of the status.
 
-The consequence is that `linkam/protocol.py:HidProgrammer` does **not**
-inherit the ASCII application layer from `LinkamProgrammer`.  It
-overrides the read loop with a status poll (`linkam/t95.py`).  The
-inherited ASCII command methods are still present and still mean what
-they mean, but **they do nothing on this link** and must not be used to
-drive a ramp until the command frame format is found.
+### 5.6 THE PROTOCOL — recovered from Linkam's own SDK
 
-### 5.6 The frame acceptance rule
+**This is the important section.  The whole command protocol is now
+known**, and it was not guessed: it was read out of Linkam's commercial
+SDK, which was published in the public repository
+`DiamondLightSource/linkam3` as `linkamT96App/src/libLinkamSDK.so`
+(18.7 MB, ELF x86-64, **unstripped, with full DWARF debug
+information**, copyright 2018-2023 Linkam Scientific Instruments).
 
-The device answers an output report when its **first two bytes are
-equal**.  This was established by mutating one byte of a 63-byte
-report at a time, then re-tested with three repeats per case and a
-liveness poll after every frame:
+That library is the same device driver that Linkam's own NEXUS/LINK
+software uses, and it drives the T95 and T96 over exactly this USB HID
+link.  Its Linux build embeds HIDAPI, so it talks to the device with
+`hid_open` / `hid_write` / `hid_read_timeout` — the same three calls a
+Linux driver makes.
 
-| Request | Answered? |
-|---|---|
-| byte 0 = byte 1 (any value: 00, 01, 02, 03, 10, 41, 4d, 50, 51, 52, 7f, ff, and the ASCII pairs `??`, `MM`) | yes |
-| byte 0 != byte 1 | no — the device says nothing at all |
-| bytes 2..62 set to anything, with byte 0 == byte 1 | yes, and the answer is **identical** |
+Reproducing the extraction:
 
-That last row is what shows this is a **status poll** and not a
-request/response exchange: the whole of the request past the first two
-bytes is ignored.
-
-**But the rule is not quite "byte 0 == byte 1".**  With a *dense*
-payload (bytes 2..62 all `0x01`) the rule changes:
-
-| Request (dense payload) | Answered? |
-|---|---|
-| (0x41, 0x41), (0x01, 0x01) | yes |
-| **(0x00, 0x01)** | **yes** — unequal bytes! |
-| **(0x11, 0x10)** | **yes** — unequal bytes! |
-| (0x00, 0x00), (0x01, 0x00), (0x41, 0x40) | no |
-
-So the acceptance test is **order-sensitive** — `(0,1)` is accepted
-while `(1,0)` is not, and `(0x11,0x10)` is accepted while
-`(0x10,0x11)` is not.  That rules out every symmetric function of the
-pair (xor, sum, difference) and rules out a plain CRC over the payload:
-under a CRC, `(0,1)` and `(1,0)` would behave identically.  The rule
-must assign the two bytes different roles.
-
-The answer is always **three 63-byte blocks**, delivered together:
-
-```
-block 1 (type 1)   01 03 00 03 88 00 00 00 00 00 | f32@10 | f32@14 | f32@18 | f32@22 | 00...
-block 2 (type 2)   02 03 00 ... 01 @34 ... 48 @51 ... 00...
-block 3 (type 3)   03 03 00 ... 00...
+```bash
+curl -sSL -O https://raw.githubusercontent.com/DiamondLightSource/linkam3/HEAD/linkamT96App/src/libLinkamSDK.so
+file libLinkamSDK.so            # ELF 64-bit, not stripped, with debug_info
+nm -C libLinkamSDK.so | grep -i 'USBTxThread\|USBRxThread'
+readelf --debug-dump=info libLinkamSDK.so > dbg.txt   # the command enumerations
 ```
 
-Block 1's four floats are:
+The SDK headers (`USB.h`, `CommsAPI.h`, `LinkamSDK.h`, `Message.h`) are
+in the same directory of the same repository.
 
-| Offset | Observed | Reading |
+#### 5.6.1 Where the protocol lives in the SDK
+
+| SDK function | address | what it does |
 |---|---|---|
-| 10 | 23.44 → 23.64 → 24.03 °C, drifting smoothly by ~0.01 °C/min | **the current temperature** — confirmed by its magnitude, its smoothness and its slow drift |
-| 14 | ~-45, jumping randomly by ±1.5 between polls | a **second sensor with nothing connected** to it: noise, not a setpoint |
-| 18 | 0.7000, constant | unknown; provisionally "rate" |
-| 22 | 0.3500, constant | unknown; provisionally "limit" |
+| `USBTxThread::sendPacket` | `0x185680` | writes 64-byte blocks with `hid_write` |
+| `USBTxThread::writePacket` | `0x18543c` | writes one block header + payload |
+| `USBTxThread::makeCommand` | `0x1854b6` | splits a command into 64-byte blocks |
+| `USBTxThread::sendCommand` | `0x18474a` | queues a command |
+| `USBRxThread::readPacket` | `0x1841ba` | reads 63-byte reply blocks |
+| `USBRxThread::readReply` | `0x1839b6` | reassembles the reply |
+| `Stage::setValue` | `0x1c0b44` | sets the rate / the setpoint |
+| `Stage::startHeating` | `0x1c1082` | starts the ramp |
+| `Stage::stopHeating` | `0x1c1186` | stops the ramp |
+| `DataPollThread::run` | `0x17c74c` | polls the controller |
+| `StandardStage::parseReply` | `0x1c27da` | unpacks the status payload |
+| `TemperatureControlledStage::getValue` | `0x1c2f76` | maps status fields to values |
 
-The last two are named by analogy with the Linksys32 vocabulary
-(`Temp`, `Temp2`, `Rate`, `Limit`), which is a **guess** — they do not
-move, so nothing has confirmed what they are.
+#### 5.6.2 The wire format
 
-The poll frame is implemented in `linkam/t95.py:build_status_poll`.
+**Host to device.**  One *command* is split into one or more 64-byte
+blocks; each block is one `hid_write`:
 
-### 5.6a One gate value that behaves differently: 0x52
+```
+offset  size  meaning
+------  ----  ----------------------------------------------------
+0       1     reserved, always 0x00
+1       1     block index, 1-based
+2       1     number of blocks in this command
+3       2     command id, uint16 little endian
+5       2     payload length, uint16 little endian
+7       2     parameter 3, uint16 little endian
+9       2     parameter 4, uint16 little endian
+11      52    payload bytes 1..52
+63      1     padding
+```
 
-Walking the first byte from 0x00 upwards, with a liveness poll after
-every frame:
+Blocks 2..N carry 60 payload bytes each, at offset 3 — so every block
+holds exactly 60 bytes of the *command stream* (the 8-byte header above
+followed by the payload).  The block count is
+`ceil((payload length + 8) / 60)`, never less than one.
 
-* `0x00`–`0x51`: the usual three-block status.
-* **`0x52`: the device replies with ONE block — type 1, the temperature
-  block — and then stops servicing its OUT endpoint entirely.**  The
-  liveness poll immediately afterwards fails.
+**Device to host.**  The device answers with 63-byte blocks (the size
+its report descriptor declares):
 
-So `0x52` starts something the firmware cannot complete: it answers
-part of a response and then wedges.  Two readings fit:
+```
+offset  size  meaning
+------  ----  ----------------------------------------------------
+0       1     block index, 1-based
+1       1     number of blocks
+2       60    command stream: header as above, then payload
+62      1     padding
+```
 
-* it is a command that needs **more input from the host** (a
-  multi-frame exchange), and our next frame was not the continuation it
-  wanted; or
-* it is a command that reads a channel the firmware cannot service —
-  plausible given that the second sensor channel reads as noise, i.e.
-  nothing is connected to it — and the firmware hangs on it.
+The only difference between the two directions is that the host's block
+carries a leading `0x00` that the device's does not.
 
-Both are testable, but each attempt costs a power cycle (§5.8), so
-this is a lead to follow, not something to brute-force blindly.
+#### 5.6.3 The command vocabulary
 
-`0x53` and above have not been characterised: the scan stopped at the
-wedge.
+Recovered from the SDK's DWARF enumerations (2 094 enumerators in all;
+the T95 family is `eCMDT95*`):
 
-### 5.7 Still UNVERIFIED for the T95
+| id | name | meaning |
+|---|---|---|
+| `0x0300` | `eCMDT95_GETLINK` / `eCMDT95_START` | the status poll |
+| `0x0301` | `eCMDT95_SETMULT` | carry a `MultiCommand` |
+| `0x0302` | `eCMDT95_SETRESET` | |
+| `0x0303` | `eCMDT95_SETSTOP` | stop the ramp |
+| `0x0304` | `eCMDT95_SETHEAT` | force heating |
+| `0x0305` | `eCMDT95_SETCOOL` | force cooling |
+| `0x0306` | `eCMDT95_SETHOLD` | hold at the current temperature |
+| `0x0307` | `eCMDT95_SETRESN` | set the data resolution |
+| `0x0308` | `eCMDT95_SETMAINSFREQ` | |
+| `0x0380` | `eCMDT95MULTI_START` | sub-command: start the ramp |
+| `0x0382` | `eCMDT95MULTI_SETRATE` | sub-command: ramp rate, °C/min |
+| `0x0383` | `eCMDT95MULTI_SETLIMIT` | sub-command: setpoint, °C |
+| `0x0384` | `eCMDT95MULTI_SETTIME` | sub-command: hold time, s |
 
-**Resolved:**
+#### 5.6.4 Setting the temperature
 
-2. ~~Whether the T95 uses report IDs at all.~~  **No** — the descriptor
+Setting a setpoint is **one** command: `eCMDT95_SETMULT` (`0x0301`)
+whose payload is a 96-byte `MultiCommand`:
+
+```c
+struct MultiCommand {          // 96 bytes
+    uint16_t cmd[16];          // offset 0
+    float    value[16];        // offset 32
+};
+```
+
+`cmd` is a list of sub-commands and `value` their arguments; a zero
+`cmd` entry terminates the list.  This is exactly what the SDK's
+`Stage::startHeating` sends — rate, limit and start in **one atomic
+command**, so the instrument can never act on a half-applied programme:
+
+```
+cmd[0] = 0x0382  value[0] = rate    (°C/min)
+cmd[1] = 0x0383  value[1] = setpoint (°C)
+cmd[2] = 0x0380  value[2] = 0
+cmd[3] = 0       (terminator)
+```
+
+Because the payload is 96 bytes it needs **two** 64-byte blocks.
+
+#### 5.6.5 Reading the temperature
+
+The SDK polls with `eCMDT95_GETLINK` (`0x0300`) and no payload.  The
+answer's payload is 136 bytes:
+
+| payload offset | type | meaning |
+|---|---|---|
+| 0 | float32 | `HEATER1_TEMP` — the stage temperature, °C |
+| 4 | float32 | the second thermocouple channel |
+| 8 | float32 | `HEATER_RATE` — the programmed rate, °C/min |
+| 12 | float32 | `HEATER_SETPOINT` — the programmed setpoint, °C |
+
+Those offsets are the SDK's own: `StandardStage::parseReply` copies the
+payload to `stage + 0x80`, and `TemperatureControlledStage::getValue`
+reads `stage + 0x80` for `HEATER1_TEMP`, `stage + 0x88` for
+`HEATER_RATE` and `stage + 0x8c` for `HEATER_SETPOINT`.
+
+**This is exactly what the empirical notes in §5.6 of the previous
+revision observed**: the temperature at block offset 10, the rate at 18
+and the limit at 22 — the payload offsets plus the 10 bytes of reply
+header.  And the captured answer decodes byte for byte:
+
+```
+01 03 | 00 03 | 88 00 | 00 00 | 00 00 | 3c 80 bb 41 | 36 2e 36 c2 | 33 33 33 3f | 33 33 3b 33
+^  ^     ^  ^     ^  ^           ^  ^     ^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^
+|  |     |  |     |  |           |  +----- parameter 4
+|  |     |  |     |  |           +-------- parameter 3
+|  |     |  |     |  +-------------------- payload length = 136
+|  |     |  |     +-------------------------- command id = 0x0300 (GETLINK)
+|  |     |  +-------------------------------- block count
+|  |     +----------------------------------- block index
+|  +----------------------------------------- (block index)
++------------------------------------------- (block index)
+```
+
+### 5.7 The "first two bytes must be equal" rule was wrong
+
+An earlier revision of this document concluded that "an output report is
+accepted if and only if its first two bytes are equal".  That rule does
+not hold for the protocol Linkam's own software uses, and it is not
+even self-consistent: the same byte pair is reported as accepted in one
+experiment and rejected in another (for example `(0x00, 0x00)` was
+accepted with a zero payload and rejected with a dense one).
+
+The real rule is the SDK's: byte 0 is a reserved `0x00`, byte 1 is the
+1-based block index and byte 2 is the block count.
+
+The most likely explanation for the earlier observation is that the
+controller was running **older firmware**.  Linkam's own support notes
+say exactly this: *"T9X controller will not connect to LINK ... it may
+be that the firmware version of your T9X controller is too old for the
+installed version of LINK"*, and Linkam publishes a bootloader
+programme specifically for updating it (§5.9).
+
+### 5.8 Still UNVERIFIED for the T95
+
+**Resolved since the previous revision:**
+
+1. ~~Whether the T95 uses report IDs at all.~~  **No** — the descriptor
    defines one input and one output report, neither with a report ID.
-3. ~~The output report length it expects.~~  **63 bytes**, from the
-   descriptor's Report Count.
-4. ~~Whether the telemetry is pushed periodically or only in response to
+2. ~~The output report length it expects.~~  **63 bytes** from the
+   descriptor; but the SDK writes **64-byte blocks**, and on real
+   hardware a 63-byte write times out while a 64-byte write is
+   accepted.  Use 64.
+3. ~~Whether the telemetry is pushed periodically or only in response to
    a query.~~  **Only in response to a query.**  A 12 s passive listen
    produces nothing; a poll produces three blocks immediately.
-5. ~~The application-level encoding inside the 63-byte report.~~  It is
-   **binary** (§5.5), not ASCII.
+4. ~~The application-level encoding inside the 63-byte report.~~  It is
+   **binary** (§5.5).
+5. ~~**The command frames.**~~  **SOLVED** — §5.6.
 
 **Still open:**
 
-1. **The command frames.**  What has to be written to change the
-   setpoint, start a ramp or stop one.  This is the blocker for
-   "set temperature"; see §6.
+1. Whether the particular controller in hand runs firmware new enough
+   for this framing.  If the status poll does not answer, update the
+   firmware with Linkam's bootloader programme (§5.9) and try again.
+2. What the second thermocouple channel (payload offset 4) is wired to.
+3. The exact meaning of the `eCMDT9X_*` command family (`0x04c0`
+   and up), which the SDK uses for controller and slot information.
 
-   Ruled out so far, by experiment:
+### 5.9 The T95 has a bootloader mode, and Linkam publishes the updater
 
-   * every ASCII command from the Linksys32 vocabulary, in a dozen
-     encodings (§5.5);
-   * the request being **symmetric** with the reply — i.e. a command
-     being `[gate][gate][…][float32 argument at offset 10, 14, 18 or
-     22]`, with the command code in the gate bytes.  64 combinations
-     (command codes 0x00–0x0f × four argument offsets) were sent and
-     the status was re-polled after each; **nothing moved**.  Note
-     that these frames all satisfy the acceptance gate, so they are
-     safe to send — the instrument did not wedge on any of them.
+On power-up the controller enumerates **twice**:
 
-6. What the two constant floats at offsets 18 and 22 are.
-7. What block 2's flag byte (offset 34) and constant byte (offset 51)
-   mean.
+```
+16da:0001  Linkam Bootloader     (~5 s)
+16da:0002  Linkam T95             (normal mode)
+```
 
-### 5.8 Two behaviours that will bite you
+`linkam/hid.py` looks for `16da:0002`, so it correctly ignores the
+bootloader.  The udev rule matches `16da:0002` only, so the bootloader
+gets no extra permissions — which is fine, because it is never used.
+
+This also explains a confusing observation: `lsusb` can show the device
+as `16da:0001` in the middle of a session if it is power-cycled.
+
+**Linkam publishes the bootloader programme publicly**, at
+
+> https://drive.google.com/file/d/1_cqF_bQFy4igriZV_730pCMdf0tLE1Wh/view
+> (`Linkam Bootloader Install.zip`)
+
+and the procedure is documented at
+`https://www.linkam.co.uk/support/controllers/general#firmware`:
+install the programme, make sure only one Linkam device is connected,
+power the controller **off**, click OK, then power it on **within 20
+seconds**; the bootloader detects it and asks for a firmware file.  The
+firmware image itself has to be requested from Linkam Technical
+Support.
+
+So there is a supported route to update the controller's firmware, if
+the protocol in §5.6 turns out not to match the firmware in hand.
+
+### 5.10 Two behaviours that will bite you
 
 **The device needs a warm-up.**  After a power cycle it enumerates
 immediately but answers **nothing** for roughly a minute.  Frames sent
@@ -613,24 +729,7 @@ root (`tools/reset_usb_device.sh`) and did not always re-enumerate.
 Do not confuse this with a framing problem: a wrong payload would be
 *accepted and ignored*, not time out.
 
-### 5.9 The T95 has a bootloader mode
-
-On power-up the controller enumerates **twice**:
-
-```
-16da:0001  Linkam Bootloader     (~5 s)
-16da:0002  Linkam T95             (normal mode)
-```
-
-`linkam/hid.py` looks for `16da:0002`, so it correctly ignores the
-bootloader.  The udev rule matches `16da:0002` only, so the bootloader
-gets no extra permissions — which is fine, since it is never used.
-
-This also explains a confusing observation: `lsusb` can show the device
-as `16da:0001` in the middle of a session if it is power-cycled.
-
-
-### 5.10 Note on the telemetry encoding
+### 5.11 Note on the telemetry encoding
 
 On the RS-232 link the telemetry contains `°C` — a **degree sign**,
 which is UTF-8 (`0xC2 0xB0`), not ASCII.  Decoding payloads as ASCII
@@ -654,29 +753,38 @@ The T95's own telemetry is binary and carries no text at all (§5.5).
 | 5 | Does the hardware require a licence to ramp? | observe `Not licensed` in telemetry |
 | 6 | Does `Prog start` need a preceding `Prog Hold`/`Prog rate`? | try the documented order |
 
-A **serial sniffer** (e.g. `socat -v -x /dev/ttyUSB0,raw,echo=0 -` or a
-two-port loopback with pyserial) running alongside the real Linksys32
-software is the fastest way to close questions 1–3 in one pass: it shows
-both directions of the exact traffic the shipped software generates.
-
 ### The T95 (USB HID)
 
 | # | Question | Status |
 |---|---|---|
-| 7 | Report framing | **Solved** — ASCII-in-HID is refuted; the link is binary (§5.5) |
-| 8 | Report IDs and output size | **Solved** — no report IDs, 63-byte reports (§5.1) |
-| 9 | Telemetry cadence | **Solved** — the device is silent until polled (§5.7) |
-| 10 | **The command frames** | **OPEN** — this is what blocks setting a temperature |
+| 7 | Report framing | **Solved** — binary, §5.6.2 |
+| 8 | Report IDs and output size | **Solved** — no report IDs; 63-byte input reports, **64-byte output blocks** |
+| 9 | Telemetry cadence | **Solved** — the device is silent until polled |
+| 10 | **The command frames** | **SOLVED** — §5.6.  Setting a setpoint is `eCMDT95_SETMULT` with a 96-byte `MultiCommand` |
+| 11 | Does the controller's firmware match this framing? | try the status poll; if it does not answer, update the firmware (§5.9) |
 
-Question 10 is the one that matters now.  Everything needed to *read* a
-temperature is in place (`linkam/t95.py`, `linkam.cli read --hid`);
-nothing is known about how to *write* one.
+**Question 11 is the only thing left.**  Everything needed to *read* and
+to *write* a temperature is now known and implemented in
+`linkam/t95_protocol.py`; it just has to be tried against the
+controller in hand.
 
-The most reliable way to close it is to capture what Linkam's own
-software sends.  That needs a Windows host with the T95 control
-software, running alongside a USB capture (or a USB sniffer between
-the host and the controller).  A cheaper option is to brute-force the
-command space from the host side, but note the hazards in §5.8: frames
-the firmware dislikes can wedge the OUT endpoint, and each recovery
-costs a power cycle.
+### The SDK, as an alternative to all of this
 
+Linkam sells a **Linkam SDK** that drives the same controllers, over
+both USB and serial, on Windows and Linux, with C++, C# and Python
+interfaces.  It is the device driver their own software is built on.
+Two open-source artefacts are already public:
+
+* `pylinkam` on PyPI — Python bindings for the SDK
+  (`pip install pylinkam`), which expose
+  `connection.set_value(interface.StageValueType.HEATER_SETPOINT, 30)`
+  and `connection.get_value(interface.StageValueType.HEATER1_TEMP)`.
+* `DiamondLightSource/linkam3` — contains the SDK's Linux shared
+  library, its public headers (`USB.h`, `CommsAPI.h`, `LinkamSDK.h`,
+  `Message.h`, …) and a full EPICS driver.
+
+The SDK binary and a per-machine licence file (`Linkam.lsk`) are not
+redistributed with `pylinkam`; they have to be obtained from Linkam.
+If the licence is available, `pylinkam` is the supported way to drive
+the stage and this driver is unnecessary.  If it is not, the protocol
+recovered in §5.6 is the fallback.

@@ -1003,39 +1003,53 @@ class HidProgrammer(LinkamProgrammer):
     # -- the T95's binary protocol ----------------------------------------- #
     #
     # The T95 does not speak the Linksys32 ASCII application layer over
-    # HID.  It speaks a binary block protocol (see ``linkam/t95.py``):
-    # the device answers a status poll with three 63-byte blocks, the
-    # first of which carries the current temperature as a float32.
+    # HID.  It speaks a binary block protocol, recovered from Linkam's
+    # own SDK -- see ``linkam/t95_protocol.py`` for the framing and the
+    # command vocabulary.
     #
-    # So the HID programmer overrides the ASCII read loop with a polling
-    # loop.  The ASCII command methods are inherited unchanged, but they
-    # have **no effect** on this link -- the command frame format has
-    # not been found -- so they must not be used to drive a ramp until
-    # it is.
+    # The status poll is a single command, ``eCMDT95_GETLINK`` (0x0300),
+    # and the device answers with three 63-byte blocks whose first block
+    # carries the current temperature as a float32.
+    #
+    # Setting the temperature is a single command, ``eCMDT95_SETMULT``
+    # (0x0301), carrying a 96-byte ``MultiCommand`` payload.  The
+    # inherited ASCII command methods (``set_rate``, ``set_limit``,
+    # ``start``, ``stop``) are therefore **overridden** here: they would
+    # send ASCII, which this link ignores.
 
     #: How often to poll the T95 for status.
     POLL_PERIOD_S = 0.5
 
+    def _write_blocks(self, frames) -> None:
+        """Write raw protocol blocks to the transport."""
+        transport = self._transport
+        if transport is None:
+            raise ConnectionError_("port is not open")
+        writer = getattr(transport, "write_blocks", None)
+        if writer is None:
+            raise ConnectionError_(
+                "the transport does not support the T95's binary protocol"
+            )
+        with self._lock:
+            writer(frames)
+
     def poll_status(self, timeout: float | None = None) -> T95Status:
         """Ask the T95 for its status and return the parsed answer.
 
-        This is the only write this class makes on the T95's binary
-        protocol: a status poll, which the instrument cannot act on.
+        This is a read-only command: the instrument cannot act on it.
         """
         from .t95 import build_status_poll, parse_status
 
         transport = self._transport
         if transport is None:
             raise ConnectionError_("port is not open")
-        writer = getattr(transport, "write_report", None)
         reader = getattr(transport, "read_reports", None)
-        if writer is None or reader is None:
+        if reader is None:
             raise ConnectionError_(
                 "the transport does not support the T95's binary protocol"
             )
 
-        with self._lock:
-            writer(build_status_poll())
+        self._write_blocks(build_status_poll())
         blocks = reader(3, timeout if timeout is not None else self.timeout)
         if not blocks:
             raise ProtocolError(
@@ -1076,6 +1090,92 @@ class HidProgrammer(LinkamProgrammer):
         """
         return self.read_status(timeout, retries).temperature_c
 
+    # -- temperature control ----------------------------------------------- #
+    #
+    # These override the inherited ASCII methods.  The ASCII commands
+    # (``prog rate 5``, ``prog limit 40``, ``Prog start``) are silently
+    # ignored on this link, so they must not be used.
+
+    def set_rate(self, rate: float) -> None:
+        """Set the ramp rate in degrees Celsius per minute.
+
+        Sends ``eCMDT95MULTI_SETRATE`` inside an ``eCMDT95_SETMULT``
+        command.  This arms the rate; the instrument does not move until
+        a start command follows.
+        """
+        from .t95 import build_rate_command
+
+        self._write_blocks(build_rate_command(rate))
+
+    def set_limit(self, limit: float) -> None:
+        """Set the temperature setpoint in degrees Celsius.
+
+        Sends ``eCMDT95MULTI_SETLIMIT`` inside an ``eCMDT95_SETMULT``
+        command.  This arms the setpoint; the instrument does not move
+        until a start command follows.
+        """
+        from .t95 import build_setpoint_command
+
+        self._write_blocks(build_setpoint_command(limit))
+
+    def programme_ramp(
+        self,
+        row: int,
+        rate: float,
+        limit: float,
+        time_s: float,
+    ) -> None:
+        """Programme a complete ramp in a single compound command.
+
+        On the T95 this is the ``eCMDT95MULTI_*`` sub-commands -- rate,
+        limit, hold time and start -- carried in one ``MultiCommand``,
+        so the instrument can never act on a partially-applied
+        programme.
+
+        `row` is ignored: the T95's programmer runs a single ramp, not
+        the Linksys32 profile table.
+        """
+        from .t95 import Cmd, build_command_frames, build_multi_command
+
+        payload = build_multi_command(
+            [
+                (Cmd.MULTI_SETRATE, rate),
+                (Cmd.MULTI_SETLIMIT, limit),
+                (Cmd.MULTI_SETTIME, time_s),
+                (Cmd.MULTI_START, 0.0),
+            ]
+        )
+        self._write_blocks(build_command_frames(Cmd.SETMULT, payload))
+
+    def start(self, rate: float | None = None, setpoint: float | None = None) -> None:
+        """Start the ramp.
+
+        If `rate` and `setpoint` are given, they are programmed and
+        started **in one command**, which is what Linkam's own software
+        does: the instrument can never act on a half-applied programme.
+
+        Without them the instrument uses whatever rate and setpoint were
+        armed earlier.
+        """
+        from .t95 import Cmd, build_command_frames, build_multi_command
+
+        if rate is not None and setpoint is not None:
+            entries = [
+                (Cmd.MULTI_SETRATE, rate),
+                (Cmd.MULTI_SETLIMIT, setpoint),
+                (Cmd.MULTI_START, 0.0),
+            ]
+        else:
+            entries = [(Cmd.MULTI_START, 0.0)]
+        payload = build_multi_command(entries)
+        self._write_blocks(build_command_frames(Cmd.SETMULT, payload))
+
+    def stop(self) -> None:
+        """Stop the ramp (``eCMDT95_SETSTOP``)."""
+        from .t95 import build_stop_heating_command
+
+        self._write_blocks(build_stop_heating_command())
+
     def _read_loop(self) -> None:
         """Poll the T95 for status and dispatch it to the listeners."""
         from .t95 import build_status_poll, parse_status
@@ -1083,9 +1183,8 @@ class HidProgrammer(LinkamProgrammer):
         transport = self._transport
         if transport is None:
             return
-        writer = getattr(transport, "write_report", None)
         reader = getattr(transport, "read_reports", None)
-        if writer is None or reader is None:
+        if reader is None or not hasattr(transport, "write_blocks"):
             # No binary protocol on this transport: fall back to the
             # inherited ASCII read loop.
             super()._read_loop()
@@ -1093,7 +1192,7 @@ class HidProgrammer(LinkamProgrammer):
 
         while not self._stop.is_set():
             try:
-                self._read_loop_once(writer, reader)
+                self._read_loop_once(reader=reader)
             except Exception as exc:  # pragma: no cover - hardware fault
                 log.warning("poll error: %s", exc)
                 self._state.connected = False
@@ -1110,15 +1209,12 @@ class HidProgrammer(LinkamProgrammer):
         transport = self._transport
         if transport is None:
             return False
-        if writer is None:
-            writer = getattr(transport, "write_report", None)
         if reader is None:
             reader = getattr(transport, "read_reports", None)
-        if writer is None or reader is None:
+        if reader is None:
             return False
 
-        with self._lock:
-            writer(build_status_poll())
+        self._write_blocks(build_status_poll())
         blocks = reader(3, self.timeout)
         if not blocks:
             return False
@@ -1134,8 +1230,8 @@ class HidProgrammer(LinkamProgrammer):
         if status.rate is not None:
             tlm.values["rate"] = status.rate
             tlm.units["rate"] = "°C/min"
-        if status.limit is not None:
-            tlm.values["limit"] = status.limit
+        if status.setpoint_c is not None:
+            tlm.values["limit"] = status.setpoint_c
             tlm.units["limit"] = "°C"
 
         self._absorb(tlm)

@@ -846,6 +846,38 @@ class HidTransport:
                 ) from exc
             raise
 
+    def write_blocks(self, frames: Sequence[bytes]) -> None:
+        """Write one or more raw output reports, verbatim.
+
+        The T95's real protocol is a binary block protocol, and Linkam's
+        own SDK writes it as **64-byte** blocks -- one ``hid_write`` per
+        block, with no padding or truncation applied by the host.  That
+        is one byte more than the report descriptor declares (63), and
+        the difference matters: on real hardware a 63-byte output write
+        times out, while a 64-byte write is accepted.
+
+        Unlike :meth:`write_report` this applies **no** size adjustment
+        at all, so it is the only correct way to send a binary frame.
+        """
+        if self._fd is None:
+            raise ConnectionError("hidraw device is not open")
+        for frame in frames:
+            log.debug("-> block %r", frame)
+            try:
+                os.write(self._fd, frame)
+            except OSError as exc:
+                if exc.errno == errno.ETIMEDOUT:
+                    raise ConnectionError(
+                        "the T95 did not accept the output block "
+                        "(ETIMEDOUT): the device is enumerated and its "
+                        "report descriptor reads correctly, but it is not "
+                        "servicing its OUT endpoint. This is not a framing "
+                        "problem. Power-cycle the stage (off, wait 10 s, on) "
+                        "and replug the USB cable; if it persists, reset the "
+                        "USB device with 'sudo ./tools/reset_usb_device.sh'."
+                    ) from exc
+                raise
+
     def read_reports(self, count: int, timeout: float = 1.0) -> list[bytes]:
         """Read up to `count` raw input reports, stopping at `timeout`.
 

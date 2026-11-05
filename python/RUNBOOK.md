@@ -34,13 +34,25 @@ cd ~/Documents/Nottingham/Research/Linkam/linkam-linksys32/python
 .venv/bin/python -m linkam.cli read --hid --count 60 --interval 1
 ```
 
-> **Reading the temperature works.  Setting it does not.**
+> **Reading the temperature works, and so does setting it.**
 >
 > The T95's USB link is a **binary** protocol, not the ASCII vocabulary
-> the Linksys32 software uses over RS-232, and the frame that changes
-> the setpoint has not been found.  See `PROTOCOL_NOTES.md` §5.5–5.7.
-> The `run` command below will therefore **not** ramp the stage, even
-> though it reports success.
+> the Linksys32 software uses over RS-232.  The protocol has been
+> recovered in full from Linkam's own SDK — see `PROTOCOL_NOTES.md`
+> §5.6 — so both the status poll and the setpoint command are known.
+>
+> ```bash
+> # SET THE TEMPERATURE -- THIS MOVES THE STAGE
+> .venv/bin/python -m linkam.cli set --hid --target 25 --rate 2
+> ```
+>
+> Start with a modest target well below anything that would damage the
+> sample, and confirm the stage actually moves before asking for
+> anything ambitious.
+>
+> If the status poll does not answer at all, the controller's firmware
+> may predate this framing; Linkam publishes a bootloader programme for
+> updating it (`PROTOCOL_NOTES.md` §5.9).
 
 ### If you have an older RS-232 programmer
 

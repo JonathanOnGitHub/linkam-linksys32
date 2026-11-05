@@ -17,6 +17,8 @@ linkam/
   protocol.py    Linkam temperature programmer protocol + command vocabulary
   transport.py   physical-link abstraction (serial / HID)
   hid.py         USB HID transport for the Linkam T95 (16da:0002)
+  t95.py         the T95 protocol, re-exported for convenience
+  t95_protocol.py  the T95's binary frame format and command vocabulary
   video.py       video capture backends (DirectShow / V4L2)
   experiment.py  orchestration: ramp + hold + concurrent capture
   simulator.py   software simulator of the programmer (no hardware needed)
@@ -27,7 +29,7 @@ RUNBOOK.md     step-by-step first-run checklist for real hardware
 tools/
   find_adapter.py  identify the instrument (USB HID) or the USB-to-RS232 adapter
   t95_hid_probe.py read-only HID reconnaissance: descriptor + framing probe
-tests/           110 tests, no hardware required
+tests/           189 tests, no hardware required
 ```
 
 > New to this, and holding real hardware? Start with **`RUNBOOK.md`** — it
@@ -36,30 +38,35 @@ tests/           110 tests, no hardware required
 
 ---
 
-## Two links, one protocol
+## Two links, two protocols
 
-The Linkam application layer is **line-oriented ASCII text** regardless of
-the physical link.  That was established statically from the shipped
-binaries: `LinksysActXLib.ocx` reads replies with VB's
-`__vbaLineInputStr`, and the telemetry frame is a plain string such as
+The legacy RS-232 link is **line-oriented ASCII text**.  That was
+established statically from the shipped binaries: `LinksysActXLib.ocx`
+reads replies with VB's `__vbaLineInputStr`, and the telemetry frame is
+a plain string such as
 
 ```
 Temp 23.4 °C~Rate 10 °C/min~Limit 25.4 °C
 ```
 
-Only the *framing* differs between links, so the package is split at
-that seam:
+`~` separates fields, `;` separates sub-values within a field.
 
-| Link | Transport | Notes |
-|------|-----------|-------|
+The T95's USB HID link is a **binary block protocol** instead, and it
+has been recovered in full from Linkam's own SDK — see
+`linkam/t95_protocol.py` and `PROTOCOL_NOTES.md` §5.6.
+
+So the package is split at the seam between the physical link and the
+application layer:
+
+| Link | Transport | Application layer |
+|------|-----------|-------------------|
 | RS-232 (legacy Linksys32) | `transport.SerialTransport` | ASCII line, CR/LF/CRLF, baud rate |
-| USB HID (**Linkam T95**) | `hid.HidTransport` | ASCII line inside an HID report |
+| USB HID (**Linkam T95**) | `hid.HidTransport` | binary 64-byte blocks, command ids |
 
-Everything above the transport — telemetry parsing, ramp sequencing,
-stall detection, CSV output — is shared.  `LinkamProgrammer` is the
-serial one; `HidProgrammer` is the T95 one, and it inherits all of the
-ramp logic.  The command vocabulary (`Prog start`, `prog ramp 1 rate 5
-limit 40 time 60`, …) is **identical** on both.
+Everything above the transport — telemetry normalisation, ramp
+sequencing, stall detection, CSV output — is shared.  `LinkamProgrammer`
+is the serial one; `HidProgrammer` is the T95 one, and it inherits all
+of the ramp logic.
 
 ### The T95 is USB HID, not a serial port
 
@@ -141,6 +148,9 @@ python -m linkam.cli ports
 # settle the framing against real hardware (read-only queries)
 python -m linkam.cli probe --port /dev/ttyUSB0 --baud 9600
 
+# set the stage temperature -- THIS MOVES THE STAGE
+python -m linkam.cli set --port /dev/ttyUSB0 --target 95 --rate 2
+
 # isothermal experiment: ramp to 95 C at 2 C/min, hold 10 min, record video
 python -m linkam.cli run \
     --port /dev/ttyUSB0 --baud 9600 \
@@ -166,8 +176,11 @@ The T95 uses `--hid` instead of `--port`, and needs no serial adapter:
 # find the device and report the hidraw node
 python tools/find_adapter.py
 
-# READ THE TEMPERATURE (read-only; this works today)
+# READ THE TEMPERATURE (read-only)
 python -m linkam.cli read --hid
+
+# SET THE TEMPERATURE -- THIS MOVES THE STAGE
+python -m linkam.cli set --hid --target 95 --rate 2
 
 # a series, and machine-readable output
 python -m linkam.cli read --hid --count 60 --interval 1
@@ -177,23 +190,40 @@ python -m linkam.cli read --hid --json
 python tools/t95_hid_probe.py --descriptor-only
 ```
 
-> **Reading the temperature works.  Setting it does not — yet.**
+> **Reading the temperature works — and so does setting it.**
 >
 > The T95's USB link is **not** the ASCII, line-oriented application
-> layer that Linksys32 uses over RS-232.  It is a **binary** block
-> protocol: the device answers an output report if and only if its
-> first two bytes are equal, and replies with three 63-byte blocks, the
-> first of which carries the current temperature as a little-endian
-> float32 at offset 10.
+> layer that Linksys32 uses over RS-232.  It is a **binary block
+> protocol**, and it has now been recovered in full from **Linkam's own
+> SDK** (their commercial device driver, published unstripped with full
+> debug information in the `DiamondLightSource/linkam3` repository).
 >
-> No ASCII command from the Linksys32 vocabulary (`Prog rate`,
-> `Prog Limit`, `prog ramp ...`, `MA6`, ...) has any effect on this
-> link.  The frame that changes the setpoint has not been found, so
-> `run --hid` will **not** ramp the stage even though it reports
-> success.
+> * A **status poll** is one command, `eCMDT95_GETLINK` (`0x0300`),
+>   written as a single 64-byte HID block.  The device answers with
+>   three 63-byte blocks carrying the temperature, the second
+>   thermocouple, the rate and the setpoint as little-endian float32.
+> * **Setting the temperature** is one command, `eCMDT95_SETMULT`
+>   (`0x0301`), carrying a 96-byte `MultiCommand` payload:
+>   `cmd[0]=0x0382` (rate), `cmd[1]=0x0383` (setpoint),
+>   `cmd[2]=0x0380` (start).  Rate, setpoint and start go out
+>   together, so the instrument can never act on a half-applied
+>   programme.
 >
-> See `PROTOCOL_NOTES.md` §5.5–5.9 for the evidence, and §6 for what
-> is still open.
+> See `linkam/t95_protocol.py` for the framing and the command
+> vocabulary, and `PROTOCOL_NOTES.md` §5.6 for the evidence.
+>
+> The one thing left to check against real hardware is that the
+> controller's firmware matches this framing; if the status poll does
+> not answer, the firmware may be too old, and Linkam publishes a
+> bootloader programme for updating it (`PROTOCOL_NOTES.md` §5.9).
+>
+> ```bash
+> # read the temperature
+> python -m linkam.cli read --hid
+>
+> # set the temperature -- THIS MOVES THE STAGE
+> python -m linkam.cli set --hid --target 95 --rate 2
+> ```
 
 Two behaviours to know about:
 
@@ -247,6 +277,13 @@ p.close()
 without any further host involvement. The host's job is to (a) send the
 programme and (b) log telemetry. This matters: a stalled Python process
 cannot cause an overshoot, because the ramp does not depend on the host.
+
+On the RS-232 link the programme is the ASCII compound command
+`prog ramp 1 rate 5 limit 40 time 60`. On the T95's USB link it is one
+binary command, `eCMDT95_SETMULT`, carrying a `MultiCommand` with the
+rate, the limit, the hold time and the start — so the two paths are
+equivalent in what they mean and different only in how they are
+encoded.
 
 Telemetry arrives every **0.2977 s** as a single text string:
 
@@ -454,6 +491,11 @@ implement the stage command vocabulary (`MA*`, `MM*`, `MV*`, `ZA`/`ZF`,
 and stage registers are out of scope and will not work — see
 `PROTOCOL_NOTES.md` §1.1b.
 
+The T95's binary protocol is implemented for the **temperature**
+commands only. The SDK's command set is much larger — vacuum, motors,
+tensile, humidity, the plunger stages — and none of that is covered
+here.
+
 Video capture assumes a **Conexant BT848** card (the VideoFusion device).
 A modern USB camera will not be driven by the `dshow` backend as written.
 
@@ -461,7 +503,25 @@ A modern USB camera will not be driven by the `dshow` backend as written.
 
 ## Provenance
 
-Derived from the files on the Linksys32 CD (Linkam Scientific Instruments,
-Linksys32 thermal analysis / microscopy control software, 2003). See
-`PROTOCOL_NOTES.md` for what was recovered, the sources it came from, and
-what remains unverified.
+Two sources, and they cover different links:
+
+**The RS-232 link** is derived from the files on the Linksys32 CD (Linkam
+Scientific Instruments, Linksys32 thermal analysis / microscopy control
+software, 2003) — `LinksysActXLib.ocx`, `CommX.ocx`, `Linksys32.exe` and
+the help file.
+
+**The T95's USB HID link** is derived from **Linkam's own SDK** — the
+commercial device driver their NEXUS and LINK software is built on.
+The Linux build (`libLinkamSDK.so`, copyright 2018-2023 Linkam Scientific
+Instruments) is published unstripped, with full DWARF debug information,
+in the public `DiamondLightSource/linkam3` repository; its public
+headers (`USB.h`, `CommsAPI.h`, `LinkamSDK.h`, `Message.h`) are in the
+same place.  `pylinkam` on PyPI is the Python binding to it.
+
+See `PROTOCOL_NOTES.md` for what was recovered from each, the evidence,
+and what remains unverified.
+
+> The SDK binary and a per-machine licence file (`Linkam.lsk`) are not
+> redistributed with `pylinkam`; they have to be obtained from Linkam.
+> If a licence is available, `pylinkam` is the supported way to drive
+> the stage and this driver is unnecessary.

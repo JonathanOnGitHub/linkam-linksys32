@@ -154,7 +154,7 @@ def _read(args) -> int:
                 "temperature_c": temp,
                 "sensor2_c": status.sensor2_c,
                 "rate": status.rate,
-                "limit": status.limit,
+                "limit": status.setpoint_c,
                 "block_types": status.block_types,
             }
             readings.append(reading)
@@ -163,8 +163,8 @@ def _read(args) -> int:
                 extra = []
                 if status.rate is not None:
                     extra.append(f"rate={status.rate:g}")
-                if status.limit is not None:
-                    extra.append(f"limit={status.limit:g}")
+                if status.setpoint_c is not None:
+                    extra.append(f"limit={status.setpoint_c:g}")
                 suffix = ("  " + "  ".join(extra)) if extra else ""
                 print(f"  {shown}{suffix}")
             if i + 1 < count:
@@ -177,6 +177,42 @@ def _read(args) -> int:
 
     if args.json:
         print(json.dumps(readings, indent=2))
+    return 0
+
+
+def _set(args) -> int:
+    """Set the stage temperature.  **This moves the stage.**
+
+    On the T95's USB HID link the setpoint, the rate and the start go
+    out as a single ``eCMDT95_SETMULT`` command, so the instrument can
+    never act on a half-applied programme.
+
+    This is the one command in this tool that changes the instrument's
+    state, so it prints what it did.
+    """
+    prog = _make_programmer(args)
+    try:
+        prog.open()
+        try:
+            if getattr(args, "hid", False):
+                prog.start(args.rate, args.target)
+            else:
+                # The legacy RS-232 link speaks the ASCII vocabulary.
+                if args.rate is not None:
+                    prog.set_rate(args.rate)
+                prog.set_limit(args.target)
+                prog.start()
+        except Exception as exc:
+            print(f"set failed: {exc}", file=sys.stderr)
+            return 1
+    finally:
+        try:
+            prog.close()
+        except Exception:
+            pass
+
+    rate = f" at {args.rate:g} C/min" if args.rate is not None else ""
+    print(f"setpoint {args.target:g} C{rate}")
     return 0
 
 
@@ -319,6 +355,22 @@ def main(argv=None) -> int:
     rd.add_argument("--json", action="store_true",
                     help="emit the readings as JSON")
 
+    st = sub.add_parser(
+        "set",
+        help="set the stage temperature (THIS MOVES THE STAGE)",
+    )
+    st.add_argument("--port", help="serial port (legacy RS-232 link)")
+    st.add_argument("--hid", action="store_true",
+                    help="use the USB HID link (Linkam T95)")
+    st.add_argument("--hid-node", default=None,
+                    help="explicit hidraw node, e.g. /dev/hidraw1")
+    st.add_argument("--baud", type=int, default=9600)
+    st.add_argument("--target", type=float, required=True, help="target °C")
+    st.add_argument("--rate", type=float, default=None,
+                    help="ramp rate in °C/min (default: leave the "
+                         "instrument's current rate alone)")
+    st.add_argument("--timeout", type=float, default=2.0)
+
     r = sub.add_parser("run", help="run an isothermal experiment with capture")
     r.add_argument("--port", help="serial port (legacy RS-232 link)")
     r.add_argument("--hid", action="store_true",
@@ -362,7 +414,7 @@ def main(argv=None) -> int:
         return _ports()
     if args.cmd == "doctor":
         return _doctor(args)
-    if args.cmd in ("probe", "run", "read"):
+    if args.cmd in ("probe", "run", "read", "set"):
         # Exactly one transport must be selected.
         if args.hid and args.port:
             print("choose either --hid or --port, not both", file=sys.stderr)
@@ -374,6 +426,8 @@ def main(argv=None) -> int:
         return _probe(args)
     if args.cmd == "read":
         return _read(args)
+    if args.cmd == "set":
+        return _set(args)
     if args.cmd == "run":
         return _run(args)
     return 2
