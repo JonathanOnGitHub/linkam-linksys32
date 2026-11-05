@@ -93,7 +93,7 @@ import struct
 import time
 from typing import Iterable, Sequence
 
-from .transport import TransportTimeout
+from .transport import CommandTooLong, TransportTimeout
 
 log = logging.getLogger(__name__)
 
@@ -812,6 +812,59 @@ class HidTransport:
         return text or None
 
     # -- raw access, for the discovery helper ----------------------------- #
+    def write_report(self, payload: bytes) -> None:
+        """Write one raw output report, with no ASCII framing applied.
+
+        The T95's real protocol is binary, not line-oriented, so commands
+        and status polls have to go out as raw bytes.  The payload is
+        zero-padded to the device's output report size.
+
+        Unlike :meth:`write_line` this does **not** raise
+        :class:`~linkam.transport.CommandTooLong` for a payload that is
+        too long -- it is a raw write, so the caller decides.  A payload
+        longer than the report size is truncated, because at this level
+        there is no command to misread.
+        """
+        if self._fd is None:
+            raise ConnectionError("hidraw device is not open")
+        size = self._out_size or self.T95_REPORT_SIZE
+        out = payload[:size]
+        out += bytes(size - len(out))
+        log.debug("-> raw %r", out)
+        try:
+            os.write(self._fd, out)
+        except OSError as exc:
+            if exc.errno == errno.ETIMEDOUT:
+                raise ConnectionError(
+                    "the T95 did not accept the output report "
+                    "(ETIMEDOUT): the device is enumerated and its report "
+                    "descriptor reads correctly, but it is not servicing its "
+                    "OUT endpoint. This is not a framing problem. Power-cycle "
+                    "the stage (off, wait 10 s, on) and replug the USB cable; "
+                    "if it persists, reset the USB device with "
+                    "'sudo ./tools/reset_usb_device.sh'."
+                ) from exc
+            raise
+
+    def read_reports(self, count: int, timeout: float = 1.0) -> list[bytes]:
+        """Read up to `count` raw input reports, stopping at `timeout`.
+
+        Returns fewer than `count` reports if the device stops sending or
+        the timeout expires; it never blocks for longer than `timeout`
+        in total.
+        """
+        reports: list[bytes] = []
+        deadline = time.monotonic() + timeout
+        while len(reports) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            report = self.read_report(remaining)
+            if report is None:
+                break
+            reports.append(report)
+        return reports
+
     def read_report(self, timeout: float = 1.0) -> bytes | None:
         """Read one raw input report, or ``None`` on timeout."""
         if self._fd is None:

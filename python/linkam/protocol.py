@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 from .transport import SerialTransport, Transport, TransportTimeout
+from .t95 import T95Status
 
 log = logging.getLogger(__name__)
 
@@ -998,3 +999,131 @@ class HidProgrammer(LinkamProgrammer):
             "response": winner["response"] if winner else None,
             "details": results,
         }
+
+    # -- the T95's binary protocol ----------------------------------------- #
+    #
+    # The T95 does not speak the Linksys32 ASCII application layer over
+    # HID.  It speaks a binary block protocol (see ``linkam/t95.py``):
+    # the device answers a status poll with three 63-byte blocks, the
+    # first of which carries the current temperature as a float32.
+    #
+    # So the HID programmer overrides the ASCII read loop with a polling
+    # loop.  The ASCII command methods are inherited unchanged, but they
+    # have **no effect** on this link -- the command frame format has
+    # not been found -- so they must not be used to drive a ramp until
+    # it is.
+
+    #: How often to poll the T95 for status.
+    POLL_PERIOD_S = 0.5
+
+    def poll_status(self, timeout: float | None = None) -> T95Status:
+        """Ask the T95 for its status and return the parsed answer.
+
+        This is the only write this class makes on the T95's binary
+        protocol: a status poll, which the instrument cannot act on.
+        """
+        from .t95 import build_status_poll, parse_status
+
+        transport = self._transport
+        if transport is None:
+            raise ConnectionError_("port is not open")
+        writer = getattr(transport, "write_report", None)
+        reader = getattr(transport, "read_reports", None)
+        if writer is None or reader is None:
+            raise ConnectionError_(
+                "the transport does not support the T95's binary protocol"
+            )
+
+        with self._lock:
+            writer(build_status_poll())
+        blocks = reader(3, timeout if timeout is not None else self.timeout)
+        if not blocks:
+            raise ProtocolError(
+                "the T95 did not answer the status poll; it may still be "
+                "warming up after power-on (it answers about a minute after "
+                "it is plugged in)"
+            )
+        return parse_status(blocks)
+
+    def read_temperature(self, timeout: float | None = None) -> float:
+        """Return the current stage temperature in degrees Celsius.
+
+        Raises :class:`ProtocolError` if the instrument does not answer.
+        """
+        status = self.poll_status(timeout)
+        if status.temperature_c is None:
+            raise ProtocolError(
+                "the T95 answered but reported no temperature; "
+                f"blocks={[b[:12].hex() for b in status.blocks]}"
+            )
+        return status.temperature_c
+
+    def _read_loop(self) -> None:
+        """Poll the T95 for status and dispatch it to the listeners."""
+        from .t95 import build_status_poll, parse_status
+
+        transport = self._transport
+        if transport is None:
+            return
+        writer = getattr(transport, "write_report", None)
+        reader = getattr(transport, "read_reports", None)
+        if writer is None or reader is None:
+            # No binary protocol on this transport: fall back to the
+            # inherited ASCII read loop.
+            super()._read_loop()
+            return
+
+        while not self._stop.is_set():
+            try:
+                self._read_loop_once(writer, reader)
+            except Exception as exc:  # pragma: no cover - hardware fault
+                log.warning("poll error: %s", exc)
+                self._state.connected = False
+                break
+            self._stop.wait(self.POLL_PERIOD_S)
+
+    def _read_loop_once(self, writer=None, reader=None) -> bool:
+        """Poll once and dispatch the answer.  Returns True if it answered.
+
+        Split out from :meth:`_read_loop` so it can be tested directly.
+        """
+        from .t95 import build_status_poll, parse_status
+
+        transport = self._transport
+        if transport is None:
+            return False
+        if writer is None:
+            writer = getattr(transport, "write_report", None)
+        if reader is None:
+            reader = getattr(transport, "read_reports", None)
+        if writer is None or reader is None:
+            return False
+
+        with self._lock:
+            writer(build_status_poll())
+        blocks = reader(3, self.timeout)
+        if not blocks:
+            return False
+
+        status = parse_status(blocks)
+        tlm = Telemetry(raw="T95 binary status")
+        if status.temperature_c is not None:
+            tlm.values["temperature"] = status.temperature_c
+            tlm.units["temperature"] = "°C"
+        if status.sensor2_c is not None:
+            tlm.values["temperature2"] = status.sensor2_c
+            tlm.units["temperature2"] = "°C"
+        if status.rate is not None:
+            tlm.values["rate"] = status.rate
+            tlm.units["rate"] = "°C/min"
+        if status.limit is not None:
+            tlm.values["limit"] = status.limit
+            tlm.units["limit"] = "°C"
+
+        self._absorb(tlm)
+        for cb in list(self._listeners):
+            try:
+                cb(tlm)
+            except Exception:  # pragma: no cover
+                log.exception("telemetry callback failed")
+        return True

@@ -448,73 +448,145 @@ the endpoint.  Recovering requires either a power cycle of the stage
 (off, wait, on) plus a USB replug, or a `USBDEVFS_RESET` on the USB
 device (which needs root — see `tools/reset_usb_device.sh`).
 
-### 5.5 The architectural consequence
+### 5.5 The application layer is BINARY, not ASCII
 
-The application layer recovered in §1 is **line-oriented ASCII text**:
-`LinksysActXLib.ocx` reads replies with VB's `__vbaLineInputStr`, and
-the telemetry frame is a plain string.  It is therefore plausible — and
-by far the cheapest hypothesis — that the T95 carries *the same ASCII
-strings* inside HID report envelopes.
+The hypothesis in the previous revision of this document — that the T95
+carries the *same ASCII strings* as the RS-232 link inside its HID
+reports — is **refuted**.  The T95 speaks a binary block protocol.
 
-If that holds, then the entire protocol implementation above applies
-unchanged, and only the transport needs replacing.  That is how the
-package is built: `linkam/transport.py` defines the seam
-(`write_line` / `read_line`), `linkam/transport.py:SerialTransport`
-implements the RS-232 side, and `linkam/hid.py:HidTransport` implements
-the HID side.  `LinkamProgrammer` and `HidProgrammer` share every line
-of ramp logic, stall detection and telemetry parsing.
+The evidence:
 
-### 5.6 Candidate report framings
+* The device's answer is not text.  It is three 63-byte blocks whose
+  first byte is a type (1, 2, 3) and which carry **little-endian
+  float32** values, not ASCII.
+* Not one ASCII command has any effect.  `Prog rate 5`, `Prog Limit 30`,
+  `Prog stop`, `prog ramp 1 rate 5 limit 30 time 60`, `MA6`, `MC`,
+  `MF1`, `MSX`, `MVX` and `prog` were each sent, in a dozen different
+  encodings (bare ASCII, ASCII behind an equal-byte gate, length-prefixed,
+  length duplicated, ASCII at four different offsets).  None produced an
+  acknowledgement, and none changed a single field of the status.
 
-Until the real framing is observed, four candidates are supported:
+The consequence is that `linkam/protocol.py:HidProgrammer` does **not**
+inherit the ASCII application layer from `LinkamProgrammer`.  It
+overrides the read loop with a status poll (`linkam/t95.py`).  The
+inherited ASCII command methods are still present and still mean what
+they mean, but **they do nothing on this link** and must not be used to
+drive a ramp until the command frame format is found.
 
-| Framing | Layout of one report |
+### 5.6 The frame acceptance rule
+
+The device answers an output report **if and only if its first two bytes
+are equal**.  This was established by mutating one byte of a 63-byte
+report at a time:
+
+| Request | Answered? |
 |---|---|
-| `raw` | ASCII payload at byte 0 (report ID first, if the device uses IDs) |
-| `id_text` | byte 0 is the report ID, ASCII from byte 1 |
-| `text_padded` | ASCII at byte 0 of a report with no report ID, zero-padded |
-| `length_prefixed` | a length byte (or 16-bit length) then that many ASCII bytes |
+| byte 0 = byte 1 (any value: 00, 01, 02, 03, 10, 41, 7f, ff, and the ASCII pairs `??`, `MM`) | yes |
+| byte 0 != byte 1 | no — the device says nothing at all |
+| bytes 2..62 set to anything, with byte 0 == byte 1 | yes, and the answer is **identical** |
 
-Because the T95 has **no report IDs** (§5.1), `text_padded` is the
-leading candidate and is now the default in `linkam/hid.py`,
-`linkam/protocol.py` and the CLI.
+That last row is what shows this is a **status poll** and not a
+request/response exchange: the whole of the request past the first two
+bytes is ignored.
 
-`tools/t95_hid_probe.py` tries each and reports which one answers.  It
-sends only `MA6`, which reads a stage register and changes nothing.
+The answer is always **three 63-byte blocks**, delivered together:
+
+```
+block 1 (type 1)   01 03 00 03 88 00 00 00 00 00 | f32@10 | f32@14 | f32@18 | f32@22 | 00...
+block 2 (type 2)   02 03 00 ... 01 @34 ... 48 @51 ... 00...
+block 3 (type 3)   03 03 00 ... 00...
+```
+
+Block 1's four floats are:
+
+| Offset | Observed | Reading |
+|---|---|---|
+| 10 | 23.44 → 23.64 °C, drifting smoothly by ~0.01 °C/min | **the current temperature** — confirmed by its magnitude, its smoothness and its slow drift |
+| 14 | ~-45, jumping randomly by ±1.5 between polls | a **second sensor with nothing connected** to it: noise, not a setpoint |
+| 18 | 0.7000, constant | unknown; provisionally "rate" |
+| 22 | 0.3500, constant | unknown; provisionally "limit" |
+
+The last two are named by analogy with the Linksys32 vocabulary
+(`Temp`, `Temp2`, `Rate`, `Limit`), which is a **guess** — they do not
+move, so nothing has confirmed what they are.
+
+The poll frame is implemented in `linkam/t95.py:build_status_poll`.
 
 ### 5.7 Still UNVERIFIED for the T95
 
-**Resolved since the descriptor was read:**
+**Resolved:**
 
 2. ~~Whether the T95 uses report IDs at all.~~  **No** — the descriptor
    defines one input and one output report, neither with a report ID.
 3. ~~The output report length it expects.~~  **63 bytes**, from the
    descriptor's Report Count.
+4. ~~Whether the telemetry is pushed periodically or only in response to
+   a query.~~  **Only in response to a query.**  A 12 s passive listen
+   produces nothing; a poll produces three blocks immediately.
+5. ~~The application-level encoding inside the 63-byte report.~~  It is
+   **binary** (§5.5), not ASCII.
 
 **Still open:**
 
-1. The application-level encoding inside the 63-byte report.  The
-   descriptor fixes the *shape* but not the *content* format: it could
-   be the same ASCII text as the serial link, or a binary command
-   structure.  The framing candidates in §5.6 are the ASCII options.
-4. Whether the telemetry is pushed periodically (as on the serial link,
-   every 0.2977 s) or only in response to a query.  So far the device
-   has been completely silent, including during a 20 s passive listen.
-5. Whether the command terminator (CR / LF / CRLF) still applies inside
-   the HID payload.
-6. Whether the T95 supports the same command vocabulary as the older
-   RS-232 programmers, or a subset.
+1. **The command frames.**  What has to be written to change the
+   setpoint, start a ramp or stop one.  This is the blocker for
+   "set temperature"; see §6.
+6. What the two constant floats at offsets 18 and 22 are.
+7. What block 2's flag byte (offset 34) and constant byte (offset 51)
+   mean.
 
-### 5.8 Note on the telemetry encoding
+### 5.8 Two behaviours that will bite you
 
-The telemetry contains `°C` — a **degree sign**, which is UTF-8
-(`0xC2 0xB0`), not ASCII.  Decoding HID payloads as ASCII with
-`errors="replace"` silently corrupts the unit on every frame.  The HID
-transport decodes UTF-8.
+**The device needs a warm-up.**  After a power cycle it enumerates
+immediately but answers **nothing** for roughly a minute.  Frames sent
+during that window are silently dropped.  This is easy to mistake for
+a broken link.
+
+**The OUT endpoint wedges.**  A frame the firmware does not like can
+leave the device refusing further writes with `ETIMEDOUT` — including
+frames as innocuous as a plain 2-byte write, and including via the
+`HIDIOCSOUTPUT` ioctl as well as `write()`.  Reads still return nothing
+and the descriptors still read correctly, so the device is still
+enumerated and healthy; it has simply stopped servicing the endpoint.
+
+Recovery is a **power cycle of the stage** (off, wait 10 s, on) plus a
+USB replug.  A `USBDEVFS_RESET` on the USB device also works but needs
+root (`tools/reset_usb_device.sh`) and did not always re-enumerate.
+
+Do not confuse this with a framing problem: a wrong payload would be
+*accepted and ignored*, not time out.
+
+### 5.9 The T95 has a bootloader mode
+
+On power-up the controller enumerates **twice**:
+
+```
+16da:0001  Linkam Bootloader     (~5 s)
+16da:0002  Linkam T95             (normal mode)
+```
+
+`linkam/hid.py` looks for `16da:0002`, so it correctly ignores the
+bootloader.  The udev rule matches `16da:0002` only, so the bootloader
+gets no extra permissions — which is fine, since it is never used.
+
+This also explains a confusing observation: `lsusb` can show the device
+as `16da:0001` in the middle of a session if it is power-cycled.
+
+
+### 5.10 Note on the telemetry encoding
+
+On the RS-232 link the telemetry contains `°C` — a **degree sign**,
+which is UTF-8 (`0xC2 0xB0`), not ASCII.  Decoding payloads as ASCII
+with `errors="replace"` silently corrupts the unit on every frame.  The
+HID transport decodes UTF-8.
+
+The T95's own telemetry is binary and carries no text at all (§5.5).
 
 ---
 
 ## 6. Summary of open questions
+
+### The RS-232 link (legacy programmers)
 
 | # | Question | How to resolve |
 |---|---|---|
@@ -524,14 +596,30 @@ transport decodes UTF-8.
 | 4 | Baud rate for a given programmer | `CHIPDEF.INI` `Baud=` rows; try 9600/19200/38400 |
 | 5 | Does the hardware require a licence to ramp? | observe `Not licensed` in telemetry |
 | 6 | Does `Prog start` need a preceding `Prog Hold`/`Prog rate`? | try the documented order |
-| 7 | T95 report framing | `python tools/t95_hid_probe.py 30` |
-| 8 | T95 report IDs and output size | the same probe, from the report descriptor |
-| 9 | T95 telemetry cadence (push or poll?) | listen on the hidraw node after a query |
 
 A **serial sniffer** (e.g. `socat -v -x /dev/ttyUSB0,raw,echo=0 -` or a
 two-port loopback with pyserial) running alongside the real Linksys32
 software is the fastest way to close questions 1–3 in one pass: it shows
 both directions of the exact traffic the shipped software generates.
 
-For the T95, questions 7–9 are answered by
-`python tools/t95_hid_probe.py 30`, which is entirely read-only.
+### The T95 (USB HID)
+
+| # | Question | Status |
+|---|---|---|
+| 7 | Report framing | **Solved** — ASCII-in-HID is refuted; the link is binary (§5.5) |
+| 8 | Report IDs and output size | **Solved** — no report IDs, 63-byte reports (§5.1) |
+| 9 | Telemetry cadence | **Solved** — the device is silent until polled (§5.7) |
+| 10 | **The command frames** | **OPEN** — this is what blocks setting a temperature |
+
+Question 10 is the one that matters now.  Everything needed to *read* a
+temperature is in place (`linkam/t95.py`, `linkam.cli read --hid`);
+nothing is known about how to *write* one.
+
+The most reliable way to close it is to capture what Linkam's own
+software sends.  That needs a Windows host with the T95 control
+software, running alongside a USB capture (or a USB sniffer between
+the host and the controller).  A cheaper option is to brute-force the
+command space from the host side, but note the hazards in §5.8: frames
+the firmware dislikes can wedge the OUT endpoint, and each recovery
+costs a power cycle.
+

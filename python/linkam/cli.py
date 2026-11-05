@@ -123,6 +123,58 @@ def _probe(args) -> int:
     return 0 if result.get("winner") else 1
 
 
+def _read(args) -> int:
+    """Read the instrument's temperature.  Sends no commands.
+
+    This is deliberately the smallest possible interaction with the
+    instrument: it polls the T95's status and prints the temperature.
+    Nothing here can start a ramp or change the setpoint.
+    """
+    import time as _time
+
+    prog = _make_programmer(args)
+    readings = []
+    try:
+        prog.open()
+        count = max(1, args.count)
+        for i in range(count):
+            try:
+                status = prog.poll_status(timeout=args.timeout)
+            except Exception as exc:
+                print(f"read failed: {exc}", file=sys.stderr)
+                return 1
+            reading = {
+                "t": _time.time(),
+                "temperature_c": status.temperature_c,
+                "sensor2_c": status.sensor2_c,
+                "rate": status.rate,
+                "limit": status.limit,
+                "block_types": status.block_types,
+            }
+            readings.append(reading)
+            if not args.json:
+                temp = status.temperature_c
+                shown = f"{temp:.4f} C" if temp is not None else "no temperature reported"
+                extra = []
+                if status.rate is not None:
+                    extra.append(f"rate={status.rate:g}")
+                if status.limit is not None:
+                    extra.append(f"limit={status.limit:g}")
+                suffix = ("  " + "  ".join(extra)) if extra else ""
+                print(f"  {shown}{suffix}")
+            if i + 1 < count:
+                _time.sleep(args.interval)
+    finally:
+        try:
+            prog.close()
+        except Exception:
+            pass
+
+    if args.json:
+        print(json.dumps(readings, indent=2))
+    return 0
+
+
 def _doctor(args) -> int:
     from .diagnostics import format_report, run_checks
 
@@ -237,6 +289,31 @@ def main(argv=None) -> int:
     p.add_argument("--timeout", type=float, default=1.0,
                    help="per-attempt response timeout in seconds")
 
+    rd = sub.add_parser(
+        "read",
+        help="read the instrument's temperature (read-only, no commands sent)",
+    )
+    rd.add_argument("--port", help="serial port (legacy RS-232 link)")
+    rd.add_argument("--hid", action="store_true",
+                    help="use the USB HID link (Linkam T95)")
+    rd.add_argument("--hid-node", default=None,
+                    help="explicit hidraw node, e.g. /dev/hidraw1")
+    rd.add_argument("--hid-framing", default="text_padded",
+                    choices=["raw", "id_text", "text_padded", "length_prefixed"],
+                    help="HID report framing to use")
+    rd.add_argument("--hid-report-size", type=int, default=None,
+                    help="output report size in bytes (default: 63, from the "
+                         "report descriptor)")
+    rd.add_argument("--baud", type=int, default=9600)
+    rd.add_argument("--count", type=int, default=0,
+                    help="number of readings to take (0 = one)")
+    rd.add_argument("--interval", type=float, default=1.0,
+                    help="seconds between readings")
+    rd.add_argument("--timeout", type=float, default=2.0,
+                    help="seconds to wait for each answer")
+    rd.add_argument("--json", action="store_true",
+                    help="emit the readings as JSON")
+
     r = sub.add_parser("run", help="run an isothermal experiment with capture")
     r.add_argument("--port", help="serial port (legacy RS-232 link)")
     r.add_argument("--hid", action="store_true",
@@ -280,7 +357,7 @@ def main(argv=None) -> int:
         return _ports()
     if args.cmd == "doctor":
         return _doctor(args)
-    if args.cmd in ("probe", "run"):
+    if args.cmd in ("probe", "run", "read"):
         # Exactly one transport must be selected.
         if args.hid and args.port:
             print("choose either --hid or --port, not both", file=sys.stderr)
@@ -290,6 +367,8 @@ def main(argv=None) -> int:
             return 2
     if args.cmd == "probe":
         return _probe(args)
+    if args.cmd == "read":
+        return _read(args)
     if args.cmd == "run":
         return _run(args)
     return 2

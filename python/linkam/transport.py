@@ -47,11 +47,23 @@ __all__ = [
     "Transport",
     "SerialTransport",
     "TransportTimeout",
+    "CommandTooLong",
 ]
 
 
 class TransportTimeout(TimeoutError):
     """No complete line arrived within the requested timeout."""
+
+
+class CommandTooLong(ValueError):
+    """A command does not fit in the link's fixed-size message envelope.
+
+    Raised instead of silently truncating the command.  Truncation is
+    not a safe default: a command cut short can still be a *valid*
+    command with a different meaning -- ``limit 95`` cut to ``limit 9``
+    asks the instrument to hold at 9 degrees -- and nothing downstream
+    would notice the discrepancy.
+    """
 
 
 @runtime_checkable

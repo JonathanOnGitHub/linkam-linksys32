@@ -17,7 +17,7 @@ already installed and tested; the only thing missing is the hardware.
 
 ---
 
-## TL;DR — tomorrow, in order
+## TL;DR — in order
 
 ### If you have the T95 (USB HID)
 
@@ -27,17 +27,20 @@ cd ~/Documents/Nottingham/Research/Linkam/linkam-linksys32/python
 # 1. plug in the T95 and confirm it is seen
 .venv/bin/python tools/find_adapter.py
 
-# 2. read-only reconnaissance: descriptor + framing (safe on a cold instrument)
-.venv/bin/python tools/t95_hid_probe.py 30
+# 2. READ THE TEMPERATURE  (this works today)
+.venv/bin/python -m linkam.cli read --hid
 
-# 3. confirm the link
-.venv/bin/python -m linkam.cli probe --hid
-
-# 4. FIRST temperature test — temperature only, modest limit
-.venv/bin/python -m linkam.cli run \
-    --hid --target 40 --rate 5 --hold 60 --no-video \
-    --out results/first_test
+# 3. watch it change
+.venv/bin/python -m linkam.cli read --hid --count 60 --interval 1
 ```
+
+> **Reading the temperature works.  Setting it does not.**
+>
+> The T95's USB link is a **binary** protocol, not the ASCII vocabulary
+> the Linksys32 software uses over RS-232, and the frame that changes
+> the setpoint has not been found.  See `PROTOCOL_NOTES.md` §5.5–5.7.
+> The `run` command below will therefore **not** ramp the stage, even
+> though it reports success.
 
 ### If you have an older RS-232 programmer
 
@@ -178,65 +181,112 @@ lsusb | grep 16da
 
 `find_adapter.py` reports the hidraw node and whether it is readable.
 
-### Step 2 — read-only reconnaissance
+### Step 2 — read the temperature
 
 ```bash
-.venv/bin/python tools/t95_hid_probe.py 30
+.venv/bin/python -m linkam.cli read --hid
 ```
 
-This does three things, all read-only:
+```
+  23.6406 C  rate=0.7  limit=0.35
+```
 
-1. **Dumps the HID report descriptor** and prints a table of the input,
-   output and feature reports (IDs, sizes, usages).  The descriptor is
-   also written to `/tmp/t95_hid_desc.bin`.
-2. **Tries each candidate report framing** by sending `MA6` — a
-   stage-register read that changes nothing — and reports which one the
-   instrument answers.
-3. Prints the command line to use next.
+This sends a **status poll** and nothing else — it cannot move the
+stage.  `--count N --interval S` for a series, `--json` for
+machine-readable output.
 
-If the descriptor is `UNAVAILABLE`, that is not fatal: the framing probe
-does not need it.  It happens when `usbhid` holds the interface.
-
-### Step 3 — confirm the link
+### Step 3 — the report descriptor (read-only reconnaissance)
 
 ```bash
-.venv/bin/python -m linkam.cli probe --hid
+.venv/bin/python tools/t95_hid_probe.py --descriptor-only
 ```
 
-On success:
+The T95's descriptor is known and is 29 bytes:
 
 ```
-LINK ESTABLISHED
-  framing    : raw
-  command    : 'MA6'
-  response   : 'Temp 23.4 °C'
+Usage Page (0xFFA0)        -- Linkam vendor page
+Collection (Application)
+  INPUT  : usage 0x01, 63 bytes, no report ID
+  OUTPUT : usage 0x02, 63 bytes, no report ID
 ```
 
-Pass the reported framing back with `--hid-framing <name>` until it is
-hard-coded as the default.
+So the payload is 63 bytes in each direction, with no report IDs.
 
-### Step 4 — first temperature test
+### Step 3a — two things that look like faults but are not
+
+* The device enumerates **twice** on power-up — first as
+  `16da:0001 Linkam Bootloader`, then as `16da:0002 Linkam T95`.
+  Only the second is the instrument you want; the package looks for
+  `16da:0002` and ignores the bootloader.
+* After a power cycle the device **answers nothing for about a
+  minute**.  It enumerates immediately, but frames sent during the
+  warm-up are silently dropped.  Wait, and do not mistake this for a
+  dead link.
+
+### Step 3b — if the instrument stops responding
+
+Symptom: every write fails with `ETIMEDOUT`, including a plain 2-byte
+write, while the device is still enumerated and its descriptor still
+reads.  The firmware has stopped servicing its OUT endpoint.
+
+That is **not** a framing problem — a wrong payload would be accepted
+and ignored, not time out.  Recover, in order:
+
+1. **Power-cycle the stage.** Switch it off, wait 10 s, switch it on.
+2. **Unplug and replug the USB cable.**
+3. **Reset the USB device** (needs your password):
+   ```bash
+   sudo ./tools/reset_usb_device.sh 16da:0002
+   ```
+
+The stage is self-powered over USB (`bmAttributes` 0xc0, 100 mA), so
+a USB replug alone may not restart the firmware — the power cycle is
+the important one.
+
+### Step 3c — raw byte-level probe
+
+If the high-level tools say "no response" but the device is alive, use
+the raw tool, which writes bytes directly and dumps whatever comes back
+as hex:
 
 ```bash
-.venv/bin/python -m linkam.cli run \
-    --hid --target 40 --rate 5 --hold 60 --no-video \
-    --out results/first_test
+.venv/bin/python tools/t95_squirt.py
+.venv/bin/python tools/t95_squirt.py --commands MA6 --sizes 63 --terminators crlf
+.venv/bin/python tools/t95_squirt.py --raw-hex '4d41360d0a'
 ```
 
-Watch the telemetry as it comes in:
+**Careful:** the T95 does not answer every frame, and a frame it
+dislikes can wedge its OUT endpoint (see Step 3b).  The T95 answers a
+frame only if **its first two bytes are equal**; see
+`PROTOCOL_NOTES.md` §5.6.
+
+### Step 4 — what does *not* work yet
+
+Setting the temperature.  The T95 speaks a **binary** protocol over HID
+(`PROTOCOL_NOTES.md` §5.5), and the frame that changes the setpoint has
+not been found.  Every ASCII command from the Linksys32 vocabulary has
+been tried — `Prog rate`, `Prog Limit`, `Prog stop`, `prog ramp ...`,
+`MA6`, `MC` and others, in a dozen encodings — and **none of them has
+any effect**: no acknowledgement, and no change to any status field.
+
+So the `run` command will not ramp the stage:
 
 ```bash
-watch -n1 'tail -2 results/first_test/telemetry.csv'
+# THIS DOES NOT RAMP THE STAGE -- it reports success anyway
+.venv/bin/python -m linkam.cli run --hid --target 40 --rate 5 --hold 60 --no-video
 ```
+
+Do not use it to control the stage until the command frame is known.
 
 ### If the T95 does not answer
 
 | Symptom | Likely cause |
 |---|---|
 | `find_adapter.py` does not see it | Not plugged in / not powered; check `lsusb` |
+| `lsusb` shows `16da:0001 Linkam Bootloader` | Caught it during power-up; wait for it to re-enumerate as `16da:0002` |
 | Cannot open `/dev/hidraw1` | udev rule not applied; re-plug, then check `ls -l` |
-| `probe --hid` gets no response under any framing | Wrong read-only query; try `--command prog` or `--command MC` |
-| No response at all | The payload may be binary rather than ASCII — capture a raw exchange with the vendor software and a USB sniffer |
+| `read --hid` says "did not answer the status poll" | Still warming up after power-on — wait a minute and retry |
+| Every write fails with `ETIMEDOUT` | The OUT endpoint has wedged — power-cycle the stage (Step 3b) |
 
 ---
 
