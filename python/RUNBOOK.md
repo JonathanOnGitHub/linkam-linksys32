@@ -54,6 +54,30 @@ cd ~/Documents/Nottingham/Research/Linkam/linkam-linksys32/python
 > may predate this framing; Linkam publishes a bootloader programme for
 > updating it (`PROTOCOL_NOTES.md` §5.9).
 
+### If you also want to run the video alongside it
+
+The T95 and the camera have to be on **separate USB paths**.  The T95 is
+a USB 2.0 device with latency-sensitive HID transfers, and a USB 3
+camera on the same root hub can starve them; a starved T95 stops
+servicing its OUT endpoint and every write starts failing with
+`ETIMEDOUT` until the controller is power-cycled.
+
+So:
+
+* **T95** -> a **USB 2.0-only** powered hub.  Not a USB 3 hub: that
+  would put the T95 on the same USB 2 lanes as the hub's USB 3 traffic
+  and would not isolate anything.
+* **Camera** -> the laptop's USB 3 port.
+
+Check it before a long run:
+
+```bash
+python -m linkam.cli doctor     # the "usb topology" line
+lsusb -t                       # the tree
+```
+
+The doctor warns when the T95 shares a root hub with a USB 3 device.
+
 ### If you have an older RS-232 programmer
 
 ```bash

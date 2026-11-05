@@ -52,6 +52,7 @@ __all__ = [
     "VideoSource",
     "DirectShowBackend",
     "V4L2Backend",
+    "VimbaXBackend",
     "open_video",
     "BACKENDS",
 ]
@@ -64,6 +65,11 @@ class Frame:
     image: object          # numpy.ndarray, BGR
     timestamp: float
     index: int
+    #: The camera's own timestamp, when the backend can supply one.
+    #: ``None`` for backends with no device clock.  It is *not* on the
+    #: same time base as `timestamp` unless the backend says so, so it
+    #: is for diagnostics rather than for correlation.
+    device_timestamp: float | None = None
 
 
 class VideoSource:
@@ -240,9 +246,244 @@ class V4L2Backend(VideoSource):
 # Selection
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Allied Vision / Vimba X
+# --------------------------------------------------------------------------- #
+
+#: Bayer patterns the Vimba X pixel formats use, and the OpenCV colour
+#: conversion that debayers them.
+_BAYER_CONVERSIONS = {
+    "bayerbg": "COLOR_BayerBG2BGR",
+    "bayergr": "COLOR_BayerGR2BGR",
+    "bayergb": "COLOR_BayerGB2BGR",
+    "bayerrg": "COLOR_BayerRG2BGR",
+}
+
+
+class VimbaXBackend(VideoSource):
+    """Capture from an Allied Vision camera through the Vimba X SDK.
+
+    Vimba X is Allied Vision's current, GenICam-compliant SDK — the
+    successor to Vimba — and it is what the Alvium cameras (including
+    the Alvium 1800 U-508c) speak.  The Python binding is ``vmbpy``:
+
+    .. code-block:: bash
+
+        pip install vmbpy
+
+    On Linux the ``vmbpy`` wheel bundles the VmbC libraries but **not**
+    the transport layer, so Vimba X itself has to be installed as well
+    and the GenTL found through the ``GENICAM_GENTL64_PATH`` environment
+    variable.  Without it the SDK finds no devices and this backend
+    raises with an explanation.
+
+    Parameters
+    ----------
+    device:
+        The camera id (a string such as ``"0"``) or an index into the
+        list of connected cameras.
+    exposure_us:
+        Exposure time in microseconds.  ``None`` leaves the camera's
+        setting alone.
+    frame_rate:
+        Frame rate in frames per second.  ``None`` leaves it alone.
+    pixel_format:
+        A Vimba X ``PixelFormat`` name such as ``"Mono8"``.  ``None``
+        leaves the camera's setting alone.
+    timeout_ms:
+        How long to wait for each frame.
+    """
+
+    def __init__(
+        self,
+        device: str | int = 0,
+        *,
+        exposure_us: float | None = None,
+        frame_rate: float | None = None,
+        pixel_format: str | None = None,
+        timeout_ms: int = 2000,
+    ) -> None:
+        self.device = device
+        self.exposure_us = exposure_us
+        self.frame_rate = frame_rate
+        self.pixel_format = pixel_format
+        self.timeout_ms = timeout_ms
+        self.name = f"vimbax:{device}"
+        self._stack = None
+        self._camera = None
+        self._index = 0
+
+    # -- helpers ----------------------------------------------------------- #
+    @staticmethod
+    def _import_vmbpy():
+        try:
+            import vmbpy
+        except ImportError as exc:  # pragma: no cover - depends on the host
+            raise RuntimeError(
+                "the Vimba X Python binding is not installed. Install it "
+                "with 'pip install vmbpy'. On Linux the Vimba X transport "
+                "layer has to be installed as well, and the GenTL found "
+                "through the GENICAM_GENTL64_PATH environment variable -- "
+                "the vmbpy wheel alone contains no device drivers."
+            ) from exc
+        return vmbpy
+
+    @staticmethod
+    def list_cameras() -> list[dict]:
+        """List the Allied Vision cameras the SDK can see.
+
+        Returns one dict per camera with its id, name, model and serial
+        number.  Useful for picking the right camera when more than one
+        is attached.
+        """
+        vmbpy = VimbaXBackend._import_vmbpy()
+        import contextlib
+
+        out: list[dict] = []
+        with contextlib.ExitStack() as stack:
+            vmb = stack.enter_context(vmbpy.VmbSystem.get_instance())
+            for cam in vmb.get_all_cameras():
+                out.append(
+                    {
+                        "id": cam.get_id(),
+                        "name": cam.get_name(),
+                        "model": cam.get_model(),
+                        "serial": cam.get_serial(),
+                    }
+                )
+        return out
+
+    def _select(self, vmb) -> object:
+        if isinstance(self.device, str):
+            return vmb.get_camera_by_id(self.device)
+        cameras = vmb.get_all_cameras()
+        if not cameras:
+            raise RuntimeError(
+                "no Allied Vision camera was found. Check that the camera is "
+                "powered and connected, that the Vimba X transport layer is "
+                "installed, and that GENICAM_GENTL64_PATH points at it."
+            )
+        try:
+            return cameras[int(self.device)]
+        except IndexError as exc:
+            raise RuntimeError(
+                f"camera index {self.device} is out of range; "
+                f"{len(cameras)} camera(s) are connected"
+            ) from exc
+
+    def _set_features(self, cam) -> None:
+        def apply(name: str, value) -> None:
+            try:
+                feature = cam.get_feature_by_name(name)
+            except Exception:
+                log.info("the camera has no %s feature; leaving it alone", name)
+                return
+            if not feature.is_available():
+                log.info("%s is not available on this camera; leaving it alone", name)
+                return
+            feature.set(value)
+            log.info("%s = %s", name, value)
+
+        if self.exposure_us is not None:
+            apply("ExposureTime", float(self.exposure_us))
+        if self.frame_rate is not None:
+            apply("AcquisitionFrameRate", float(self.frame_rate))
+        if self.pixel_format is not None:
+            apply("PixelFormat", self.pixel_format)
+
+    # -- the VideoSource interface ----------------------------------------- #
+    def open(self) -> None:
+        import contextlib
+
+        vmbpy = self._import_vmbpy()
+        if self._stack is not None:
+            return  # already open
+
+        stack = contextlib.ExitStack()
+        try:
+            vmb = stack.enter_context(vmbpy.VmbSystem.get_instance())
+            cam = self._select(vmb)
+            stack.enter_context(cam)
+            self._set_features(cam)
+        except Exception:
+            stack.close()
+            raise
+
+        self._stack = stack
+        self._camera = cam
+        self._index = 0
+        log.info("opened %s", self.name)
+
+    def read(self) -> Frame | None:
+        if self._camera is None:
+            raise RuntimeError("video source is not open")
+        frame = self._camera.get_frame(timeout_ms=self.timeout_ms)
+        if frame is None:
+            return None
+        image = self._to_bgr(frame)
+        if image is None:
+            return None
+        out = Frame(
+            image=image,
+            timestamp=time.time(),
+            index=self._index,
+            device_timestamp=self._device_timestamp(frame),
+        )
+        self._index += 1
+        return out
+
+    @staticmethod
+    def _device_timestamp(frame) -> float | None:
+        try:
+            return float(frame.get_timestamp())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _to_bgr(frame):
+        """Turn a Vimba X frame into an OpenCV-style BGR array."""
+        import numpy as np
+
+        # `as_opencv_image` does the conversion, including debayering,
+        # but needs the optional `opencv` extra.
+        try:
+            image = frame.as_opencv_image()
+            if image is not None:
+                return image
+        except Exception:
+            pass
+
+        array = frame.as_numpy_ndarray()
+        if array is None:
+            return None
+
+        name = str(getattr(frame, "get_pixel_format", lambda: "")() or "")
+        key = name.lower().replace("_", "")
+        if key.startswith("mono"):
+            return np.repeat(array[:, :, None], 3, axis=2) if array.ndim == 2 else array
+        for prefix, conversion in _BAYER_CONVERSIONS.items():
+            if key.startswith(prefix):
+                import cv2
+
+                return cv2.cvtColor(array, getattr(cv2, conversion))
+        if array.ndim == 2:
+            return np.repeat(array[:, :, None], 3, axis=2)
+        return array
+
+    def close(self) -> None:
+        if self._stack is not None:
+            try:
+                self._stack.close()
+            except Exception:  # pragma: no cover
+                log.exception("error closing the Vimba X camera")
+            self._stack = None
+            self._camera = None
+
+
 BACKENDS = {
     "dshow": DirectShowBackend,
     "v4l2": V4L2Backend,
+    "vimbax": VimbaXBackend,
 }
 
 

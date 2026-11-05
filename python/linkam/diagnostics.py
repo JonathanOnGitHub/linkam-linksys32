@@ -30,8 +30,11 @@ from typing import Optional
 __all__ = [
     "Check",
     "DiagnosticReport",
+    "UsbDevice",
     "run_checks",
     "format_report",
+    "usb_devices",
+    "usb_topology_report",
     "RS232_HINTS",
     "TTL_HINTS",
 ]
@@ -466,6 +469,211 @@ def _check_hid(report: DiagnosticReport) -> None:
     ))
 
 
+# --------------------------------------------------------------------------- #
+# USB topology
+# --------------------------------------------------------------------------- #
+
+#: USB speeds reported by sysfs, in bits per second.
+_USB_SPEEDS = {
+    "1.5": "low speed",
+    "12": "full speed",
+    "480": "high speed (USB 2.0)",
+    "5000": "super speed (USB 3.0)",
+    "10000": "super speed plus (USB 3.1)",
+    "20000": "super speed plus x2 (USB 3.2)",
+}
+
+
+@dataclass
+class UsbDevice:
+    """One entry of the USB tree, as reported by sysfs."""
+
+    name: str
+    vendor: str = ""
+    product: str = ""
+    speed: str = ""
+    busnum: str = ""
+    devnum: str = ""
+    product_name: str = ""
+
+    @property
+    def is_root_hub(self) -> bool:
+        return self.name.startswith("usb") and self.name[3:].isdigit()
+
+    @property
+    def is_super_speed(self) -> bool:
+        try:
+            return int(self.speed) >= 5000
+        except (TypeError, ValueError):
+            return False
+
+    @property
+    def description(self) -> str:
+        label = self.product_name or self.product or "?"
+        return f"{self.name} {self.vendor}:{self.product} {label}"
+
+
+def _read_sysfs(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def usb_devices() -> list[UsbDevice]:
+    """Enumerate the USB devices this machine can see.
+
+    Reads sysfs, so it is read-only and needs no privileges.  Returns an
+    empty list if sysfs is not there (not Linux).
+    """
+    base = "/sys/bus/usb/devices"
+    if not os.path.isdir(base):
+        return []
+    out: list[UsbDevice] = []
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return []
+    for name in names:
+        path = os.path.join(base, name)
+        if not os.path.isdir(path):
+            continue
+        out.append(
+            UsbDevice(
+                name=name,
+                vendor=_read_sysfs(os.path.join(path, "idVendor")),
+                product=_read_sysfs(os.path.join(path, "idProduct")),
+                speed=_read_sysfs(os.path.join(path, "speed")),
+                busnum=_read_sysfs(os.path.join(path, "busnum")),
+                devnum=_read_sysfs(os.path.join(path, "devnum")),
+                product_name=_read_sysfs(os.path.join(path, "product")),
+            )
+        )
+    return out
+
+
+def _parent_of(name: str) -> str | None:
+    """The bus id of a device's parent, e.g. ``1-2.3`` -> ``1-2``."""
+    if "-" not in name:
+        return None
+    return name.rsplit(".", 1)[0] if "." in name else name.rsplit("-", 1)[0]
+
+
+def usb_topology_report(vendor: str = "16da", product: str = "0002") -> dict:
+    """Describe where the T95 sits in the USB tree.
+
+    The T95 is a **USB 2.0** device whose HID transfers are small and
+    latency-sensitive.  A USB 3 camera on the same root hub can starve
+    them, and a T95 whose OUT endpoint gets starved stops servicing it
+    altogether — the symptom is a write that times out (``ETIMEDOUT``)
+    and needs a power cycle to recover.
+
+    So the interesting question is not "is the camera attached" but "does
+    the camera share a root hub with the T95".  This function answers
+    that.
+    """
+    devices = usb_devices()
+    by_name = {d.name: d for d in devices}
+
+    t95 = None
+    for device in devices:
+        if device.vendor.lower() == vendor.lower() and device.product.lower() == product.lower():
+            t95 = device
+            break
+
+    info: dict = {
+        "devices": devices,
+        "t95": t95,
+        "root_hub": None,
+        "parent": None,
+        "parent_is_super_speed": False,
+        "root_hub_devices": [],
+        "shares_root_hub_with_super_speed": False,
+        "super_speed_devices": [],
+    }
+    if t95 is None:
+        return info
+
+    parent_name = _parent_of(t95.name)
+    parent = by_name.get(parent_name) if parent_name else None
+    info["parent"] = parent
+
+    root_name = f"usb{t95.busnum}" if t95.busnum else None
+    info["root_hub"] = by_name.get(root_name) if root_name else None
+
+    on_root = [
+        d
+        for d in devices
+        if not d.is_root_hub and d.busnum == t95.busnum
+    ]
+    info["root_hub_devices"] = on_root
+    info["super_speed_devices"] = [d for d in on_root if d.is_super_speed]
+    info["shares_root_hub_with_super_speed"] = bool(info["super_speed_devices"])
+
+    if parent is not None:
+        info["parent_is_super_speed"] = parent.is_super_speed
+
+    return info
+
+
+def _check_usb_topology(report: DiagnosticReport) -> None:
+    """Warn when the T95 shares a root hub with a USB 3 device.
+
+    This is the failure mode that costs the most time to diagnose: the
+    stage works on the bench and wedges when the camera is plugged in.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+
+    try:
+        info = usb_topology_report()
+    except Exception as exc:  # pragma: no cover - defensive
+        report.add(Check("usb topology", WARN, f"could not read the USB tree: {exc}"))
+        return
+
+    t95 = info["t95"]
+    if t95 is None:
+        # Nothing to say about the topology without the device.
+        return
+
+    root = info["root_hub"]
+    detail = f"T95 on {root.name if root else 'bus ' + t95.busnum}"
+    speed = _USB_SPEEDS.get(t95.speed, t95.speed or "unknown speed")
+    detail += f" at {speed}"
+
+    if info["parent_is_super_speed"]:
+        report.add(Check(
+            "usb topology",
+            WARN,
+            detail + " — plugged into a USB 3 hub",
+            "The T95 is a USB 2.0 device and shares the USB 2 lanes of a "
+            "SuperSpeed hub with that hub's USB 3 traffic. Put it on a "
+            "USB 2.0-only hub, or on a different root port, so the camera "
+            "cannot starve it.",
+        ))
+        return
+
+    if info["shares_root_hub_with_super_speed"]:
+        others = ", ".join(d.description for d in info["super_speed_devices"][:3])
+        report.add(Check(
+            "usb topology",
+            WARN,
+            detail + f" — shares its root hub with USB 3 device(s): {others}",
+            "A USB 3 camera on the same root hub can starve the T95's HID "
+            "transfers; the symptom is a write that times out and a T95 "
+            "that needs a power cycle to recover. Put the T95 on a "
+            "USB 2.0-only hub, or on a different root port.",
+        ))
+        return
+
+    report.add(Check(
+        "usb topology",
+        OK,
+        detail + " — nothing else on its root hub",
+    ))
+
+
 # Entry points
 # --------------------------------------------------------------------------- #
 
@@ -474,6 +682,7 @@ def run_checks() -> DiagnosticReport:
     report = DiagnosticReport()
     _check_python(report)
     _check_hid(report)
+    _check_usb_topology(report)
     _check_serial(report)
     _check_video(report)
     _check_protocol(report)

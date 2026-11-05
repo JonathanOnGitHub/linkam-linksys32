@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 from .experiment import Experiment, IsothermalRun
 from .protocol import ConnectionError_, HidProgrammer, LinkamProgrammer
@@ -178,6 +179,93 @@ def _read(args) -> int:
     if args.json:
         print(json.dumps(readings, indent=2))
     return 0
+
+
+def _parse_steps(spec: str) -> list:
+    """Parse a compact step specification.
+
+    ``target:rate:hold`` per step, comma separated, e.g.::
+
+        25:5:60,60:2:600
+
+    The rate and the hold are optional; a bare number is the target.
+    """
+    from .programme import Step
+
+    steps = []
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts = chunk.split(":")
+        if not parts[0]:
+            raise ValueError(f"bad step {chunk!r}: no target")
+        target = float(parts[0])
+        rate = float(parts[1]) if len(parts) > 1 and parts[1] else 10.0
+        hold = float(parts[2]) if len(parts) > 2 and parts[2] else 0.0
+        steps.append(Step(target_c=target, rate_c_per_min=rate, hold_s=hold))
+    if not steps:
+        raise ValueError("no steps given")
+    return steps
+
+
+def _programme(args) -> int:
+    """Run a multi-step temperature programme.  **This moves the stage.**
+
+    Steps are given as ``target:rate:hold`` triples, comma separated, or
+    as a JSON file written by :meth:`linkam.programme.Programme.to_dict`.
+    """
+    import json as _json
+
+    from .programme import Programme, ProgrammeRunner, Step
+
+    try:
+        if getattr(args, "programme", None):
+            payload = _json.loads(Path(args.programme).read_text())
+            steps = [
+                Step(
+                    target_c=s["target_c"],
+                    rate_c_per_min=s.get("rate_c_per_min", 10.0),
+                    hold_s=s.get("hold_s", 0.0),
+                    label=s.get("label", ""),
+                )
+                for s in payload["steps"]
+            ]
+            programme = Programme(
+                steps=steps,
+                repeat=payload.get("repeat", 1),
+                name=payload.get("name", ""),
+            )
+        else:
+            programme = Programme(
+                steps=_parse_steps(args.steps), repeat=args.repeat, name=args.name or ""
+            )
+    except Exception as exc:
+        print(f"could not read the programme: {exc}", file=sys.stderr)
+        return 2
+
+    prog = _make_programmer(args)
+
+    def on_event(event):
+        if event.phase == "error":
+            print(f"error: {event.message}", file=sys.stderr)
+        else:
+            print(f"[{event.phase}] {event.message}")
+
+    runner = ProgrammeRunner(
+        prog,
+        programme,
+        on_event=on_event,
+        output_dir=Path(args.out) if args.out else None,
+    )
+    try:
+        result = runner.run()
+    except KeyboardInterrupt:
+        runner.abort()
+        print("interrupted", file=sys.stderr)
+        return 130
+    print(result.summary())
+    return 1 if result.error else 0
 
 
 def _set(args) -> int:
@@ -371,6 +459,28 @@ def main(argv=None) -> int:
                          "instrument's current rate alone)")
     st.add_argument("--timeout", type=float, default=2.0)
 
+    pr = sub.add_parser(
+        "program",
+        help="run a multi-step temperature programme (THIS MOVES THE STAGE)",
+    )
+    pr.add_argument("--port", help="serial port (legacy RS-232 link)")
+    pr.add_argument("--hid", action="store_true",
+                    help="use the USB HID link (Linkam T95)")
+    pr.add_argument("--hid-node", default=None,
+                    help="explicit hidraw node, e.g. /dev/hidraw1")
+    pr.add_argument("--baud", type=int, default=9600)
+    pr.add_argument("--steps", default=None,
+                    help="steps as target:rate:hold triples, comma separated, "
+                         "e.g. '25:5:60,60:2:600'")
+    pr.add_argument("--programme", default=None,
+                    help="a JSON file describing the programme")
+    pr.add_argument("--repeat", type=int, default=1,
+                    help="how many times to run the whole list of steps")
+    pr.add_argument("--name", default="", help="a name for the programme")
+    pr.add_argument("--out", default=None,
+                    help="directory for programme.json and steps.csv")
+    pr.add_argument("--timeout", type=float, default=2.0)
+
     r = sub.add_parser("run", help="run an isothermal experiment with capture")
     r.add_argument("--port", help="serial port (legacy RS-232 link)")
     r.add_argument("--hid", action="store_true",
@@ -414,7 +524,7 @@ def main(argv=None) -> int:
         return _ports()
     if args.cmd == "doctor":
         return _doctor(args)
-    if args.cmd in ("probe", "run", "read", "set"):
+    if args.cmd in ("probe", "run", "read", "set", "program"):
         # Exactly one transport must be selected.
         if args.hid and args.port:
             print("choose either --hid or --port, not both", file=sys.stderr)
@@ -428,6 +538,8 @@ def main(argv=None) -> int:
         return _read(args)
     if args.cmd == "set":
         return _set(args)
+    if args.cmd == "program":
+        return _programme(args)
     if args.cmd == "run":
         return _run(args)
     return 2

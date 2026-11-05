@@ -19,6 +19,7 @@ linkam/
   hid.py         USB HID transport for the Linkam T95 (16da:0002)
   t95.py         the T95 protocol, re-exported for convenience
   t95_protocol.py  the T95's binary frame format and command vocabulary
+  programme.py   multi-step temperature programmes (host-driven stepping)
   video.py       video capture backends (DirectShow / V4L2)
   experiment.py  orchestration: ramp + hold + concurrent capture
   simulator.py   software simulator of the programmer (no hardware needed)
@@ -29,7 +30,7 @@ RUNBOOK.md     step-by-step first-run checklist for real hardware
 tools/
   find_adapter.py  identify the instrument (USB HID) or the USB-to-RS232 adapter
   t95_hid_probe.py read-only HID reconnaissance: descriptor + framing probe
-tests/           189 tests, no hardware required
+tests/           221 tests, no hardware required
 ```
 
 > New to this, and holding real hardware? Start with **`RUNBOOK.md`** — it
@@ -302,6 +303,108 @@ was needed — any DirectShow/V4L2 capture library opens it.
 **Concurrency.** Temperature and capture run in separate threads and are
 correlated by wall-clock timestamp, not frame index. A slow encoder cannot
 stall the temperature record.
+
+---
+
+## Multi-step temperature programmes
+
+The T95's programmer model is **one ramp plus a hold** — a rate, a limit
+and a dwell time.  There is no native multi-segment programme table, so
+a multi-step programme is driven by the host: send the next step's ramp,
+notice when the temperature has arrived, send the step after that.  The
+ramps still execute inside the instrument, so the host is never in the
+control loop.
+
+`linkam/programme.py` does this, and handles the awkward part: the
+instrument runs the hold itself, so if the host waited for its own view
+of the hold to finish before sending the next ramp, the instrument's
+hold would already have expired and the stage would start cooling in
+the gap.  The runner therefore **chains** — it arms the next step just
+before the current hold expires, so the instrument ramps straight on
+and the soak is preserved.
+
+```python
+from linkam.programme import Programme, ProgrammeRunner, Step
+
+programme = Programme(
+    name="melt-and-soak",
+    steps=[
+        Step(target_c=25.0, rate_c_per_min=5.0, hold_s=60.0, label="warm"),
+        Step(target_c=60.0, rate_c_per_min=2.0, hold_s=600.0, label="soak"),
+    ],
+)
+result = ProgrammeRunner(programmer, programme, on_event=print).run()
+```
+
+`on_event` is called for every phase change (`step_start`, `reached`,
+`hold`, `step_end`, `programme_end`, `error`), which is what a UI would
+render.  `runner.abort()` stops the run from another thread — that is
+the Stop button.
+
+---
+
+## The Allied Vision camera (Vimba X)
+
+`linkam/video.py` has a `VimbaXBackend` for Allied Vision cameras,
+which is what the Alvium 1800 U-508c speaks.  Vimba X is the
+GenICam-compliant successor to Vimba, and its Python binding is
+`vmbpy`:
+
+```bash
+pip install vmbpy
+```
+
+On Linux the `vmbpy` wheel bundles the VmbC libraries but **not** the
+transport layer, so Vimba X itself has to be installed as well and the
+GenTL found through `GENICAM_GENTL64_PATH`.  Without it the SDK sees no
+devices and the backend says so.
+
+```python
+from linkam.video import VimbaXBackend
+
+with VimbaXBackend(0, exposure_us=5000, frame_rate=30) as cam:
+    frame = cam.read()
+```
+
+```bash
+# list the cameras the SDK can see
+python -c "from linkam.video import VimbaXBackend; print(VimbaXBackend.list_cameras())"
+```
+
+---
+
+## Hardware: the T95 and the camera on the same machine
+
+**Put the T95 on a USB 2.0-only hub and the camera on the USB 3 port.**
+
+This is not superstition.  The T95 is a USB 2.0 device with small,
+latency-sensitive HID transfers.  A USB 3 camera on the same root hub
+can starve them, and a starved T95 stops servicing its OUT endpoint
+altogether: the symptom is a write that times out with `ETIMEDOUT`, and
+the controller then needs a **power cycle** to recover.  That failure
+looks exactly like a framing bug, and it is the single most expensive
+thing to diagnose.
+
+The important detail is that the hub must be **USB 2.0 only**, not a
+USB 3 hub.  A USB 3 hub carries the T95 on the same USB 2 lanes as the
+hub's USB 3 traffic, so it does not isolate anything; a USB 2.0-only
+hub puts the T95 behind a transaction translator and keeps it clear of
+the camera entirely.  On a laptop that has only USB-C ports, a USB 2.0
+hub is the answer, and it needs to be powered if the camera and the
+stage are both drawing from the same port.
+
+The environment check now looks for exactly this:
+
+```bash
+python -m linkam.cli doctor
+```
+
+```
+[warn] usb topology   T95 on usb1 at high speed (USB 2.0) — shares its root
+                      hub with USB 3 device(s): 1-3.2 ...
+```
+
+and `lsusb -t` shows the tree.
 
 ---
 
