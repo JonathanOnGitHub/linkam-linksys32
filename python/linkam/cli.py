@@ -139,13 +139,19 @@ def _read(args) -> int:
         count = max(1, args.count)
         for i in range(count):
             try:
-                status = prog.poll_status(timeout=args.timeout)
+                if getattr(args, "hid", False):
+                    # The T95 can answer a poll before its first sensor
+                    # sample, so use the retrying read.
+                    status = prog.read_status(timeout=args.timeout)
+                else:
+                    status = prog.poll_status(timeout=args.timeout)
+                temp = status.temperature_c
             except Exception as exc:
                 print(f"read failed: {exc}", file=sys.stderr)
                 return 1
             reading = {
                 "t": _time.time(),
-                "temperature_c": status.temperature_c,
+                "temperature_c": temp,
                 "sensor2_c": status.sensor2_c,
                 "rate": status.rate,
                 "limit": status.limit,
@@ -153,7 +159,6 @@ def _read(args) -> int:
             }
             readings.append(reading)
             if not args.json:
-                temp = status.temperature_c
                 shown = f"{temp:.4f} C" if temp is not None else "no temperature reported"
                 extra = []
                 if status.rate is not None:

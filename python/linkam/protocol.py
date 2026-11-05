@@ -1045,18 +1045,36 @@ class HidProgrammer(LinkamProgrammer):
             )
         return parse_status(blocks)
 
-    def read_temperature(self, timeout: float | None = None) -> float:
-        """Return the current stage temperature in degrees Celsius.
+    def read_status(self, timeout: float | None = None, retries: int = 3) -> T95Status:
+        """Poll for status, retrying until a temperature is present.
 
-        Raises :class:`ProtocolError` if the instrument does not answer.
+        Right after a power cycle the instrument can answer a poll
+        before it has taken its first sensor sample, and the temperature
+        field is then zero.  A zero is not a temperature, so the poll is
+        repeated rather than reporting "no temperature".
+
+        Raises :class:`ProtocolError` if the instrument does not answer,
+        or keeps answering without a temperature.
         """
-        status = self.poll_status(timeout)
-        if status.temperature_c is None:
-            raise ProtocolError(
+        last_error = "the T95 answered but reported no temperature"
+        for _ in range(max(1, retries)):
+            status = self.poll_status(timeout)
+            if status.temperature_c is not None:
+                return status
+            last_error = (
                 "the T95 answered but reported no temperature; "
                 f"blocks={[b[:12].hex() for b in status.blocks]}"
             )
-        return status.temperature_c
+            time.sleep(0.3)
+        raise ProtocolError(last_error)
+
+    def read_temperature(self, timeout: float | None = None, retries: int = 3) -> float:
+        """Return the current stage temperature in degrees Celsius.
+
+        Raises :class:`ProtocolError` if the instrument does not answer,
+        or keeps answering without a temperature.
+        """
+        return self.read_status(timeout, retries).temperature_c
 
     def _read_loop(self) -> None:
         """Poll the T95 for status and dispatch it to the listeners."""

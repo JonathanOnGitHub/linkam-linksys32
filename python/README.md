@@ -163,23 +163,48 @@ Outputs in `--out`:
 The T95 uses `--hid` instead of `--port`, and needs no serial adapter:
 
 ```bash
-# reconnaissance: find the device, dump the HID report descriptor,
-# and work out how the ASCII payload is framed (all read-only)
-python tools/t95_hid_probe.py 30
+# find the device and report the hidraw node
+python tools/find_adapter.py
 
-# probe the link (read-only)
-python -m linkam.cli probe --hid
+# READ THE TEMPERATURE (read-only; this works today)
+python -m linkam.cli read --hid
 
-# temperature only, modest limit, no video
-python -m linkam.cli run --hid \
-    --target 40 --rate 5 --hold 60 --no-video \
-    --out results/first_test
+# a series, and machine-readable output
+python -m linkam.cli read --hid --count 60 --interval 1
+python -m linkam.cli read --hid --json
+
+# the HID report descriptor (read-only)
+python tools/t95_hid_probe.py --descriptor-only
 ```
 
-`probe --hid` tries each candidate report framing (`raw`, `id_text`,
-`text_padded`, `length_prefixed`) and reports which one the instrument
-answers.  Pass the winner back with `--hid-framing`.  Once that is
-settled it should be hard-coded as the default.
+> **Reading the temperature works.  Setting it does not — yet.**
+>
+> The T95's USB link is **not** the ASCII, line-oriented application
+> layer that Linksys32 uses over RS-232.  It is a **binary** block
+> protocol: the device answers an output report if and only if its
+> first two bytes are equal, and replies with three 63-byte blocks, the
+> first of which carries the current temperature as a little-endian
+> float32 at offset 10.
+>
+> No ASCII command from the Linksys32 vocabulary (`Prog rate`,
+> `Prog Limit`, `prog ramp ...`, `MA6`, ...) has any effect on this
+> link.  The frame that changes the setpoint has not been found, so
+> `run --hid` will **not** ramp the stage even though it reports
+> success.
+>
+> See `PROTOCOL_NOTES.md` §5.5–5.9 for the evidence, and §6 for what
+> is still open.
+
+Two behaviours to know about:
+
+* the controller enumerates **twice** on power-up — first as
+  `16da:0001 Linkam Bootloader`, then as `16da:0002 Linkam T95`;
+* after a power cycle it answers **nothing** for about a minute while
+  it warms up.  This is easy to mistake for a dead link.
+
+If every write starts failing with `ETIMEDOUT`, the firmware has
+stopped servicing its OUT endpoint; power-cycle the controller (off,
+wait 10 s, on) and replug the USB cable.
 
 ### As a library
 

@@ -130,6 +130,36 @@ def test_read_temperature_raises_when_no_temperature_is_reported():
         prog.read_temperature()
 
 
+def test_read_status_retries_while_the_sensor_is_still_cold():
+    """After a power cycle the first poll can come back with no sample.
+
+    A zero is not a temperature, so the read must be repeated rather
+    than reporting "no temperature".
+    """
+    prog = make_programmer([
+        make_block_for_test(1, temperature=None),
+        make_block_for_test(2),
+        make_block_for_test(3),
+        make_block_for_test(1, temperature=23.5),
+        make_block_for_test(2),
+        make_block_for_test(3),
+    ])
+    status = prog.read_status()
+    assert status.temperature_c == pytest.approx(23.5, abs=1e-4)
+    assert len(prog._transport.written) == 2, "it should have polled twice"
+
+
+def test_read_status_gives_up_after_the_retry_limit():
+    prog = make_programmer([
+        make_block_for_test(1, temperature=None),
+        make_block_for_test(2),
+        make_block_for_test(3),
+    ])
+    with pytest.raises(ProtocolError):
+        prog.read_status(retries=2)
+    assert len(prog._transport.written) == 2
+
+
 # --------------------------------------------------------------------------- #
 # the telemetry loop
 # --------------------------------------------------------------------------- #
