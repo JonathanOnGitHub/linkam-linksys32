@@ -238,6 +238,11 @@ and ignored, not time out.  Recover, in order:
    ```bash
    sudo ./tools/reset_usb_device.sh 16da:0002
    ```
+   This unbinds and rebinds the USB device, which re-enumerates it
+   without touching the cable.  (The `USBDEVFS_RESET` ioctl does *not*
+   work here: the kernel refuses it with `ENOTTY` on a device whose
+   interface is claimed by `hid-generic`.)  A reset is not always
+   enough — if the firmware stays wedged, do the power cycle.
 
 The stage is self-powered over USB (`bmAttributes` 0xc0, 100 mA), so
 a USB replug alone may not restart the firmware — the power cycle is

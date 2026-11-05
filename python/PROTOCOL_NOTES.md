@@ -475,19 +475,37 @@ drive a ramp until the command frame format is found.
 
 ### 5.6 The frame acceptance rule
 
-The device answers an output report **if and only if its first two bytes
-are equal**.  This was established by mutating one byte of a 63-byte
-report at a time:
+The device answers an output report when its **first two bytes are
+equal**.  This was established by mutating one byte of a 63-byte
+report at a time, then re-tested with three repeats per case and a
+liveness poll after every frame:
 
 | Request | Answered? |
 |---|---|
-| byte 0 = byte 1 (any value: 00, 01, 02, 03, 10, 41, 7f, ff, and the ASCII pairs `??`, `MM`) | yes |
+| byte 0 = byte 1 (any value: 00, 01, 02, 03, 10, 41, 4d, 50, 51, 52, 7f, ff, and the ASCII pairs `??`, `MM`) | yes |
 | byte 0 != byte 1 | no — the device says nothing at all |
 | bytes 2..62 set to anything, with byte 0 == byte 1 | yes, and the answer is **identical** |
 
 That last row is what shows this is a **status poll** and not a
 request/response exchange: the whole of the request past the first two
 bytes is ignored.
+
+**But the rule is not quite "byte 0 == byte 1".**  With a *dense*
+payload (bytes 2..62 all `0x01`) the rule changes:
+
+| Request (dense payload) | Answered? |
+|---|---|
+| (0x41, 0x41), (0x01, 0x01) | yes |
+| **(0x00, 0x01)** | **yes** — unequal bytes! |
+| **(0x11, 0x10)** | **yes** — unequal bytes! |
+| (0x00, 0x00), (0x01, 0x00), (0x41, 0x40) | no |
+
+So the acceptance test is **order-sensitive** — `(0,1)` is accepted
+while `(1,0)` is not, and `(0x11,0x10)` is accepted while
+`(0x10,0x11)` is not.  That rules out every symmetric function of the
+pair (xor, sum, difference) and rules out a plain CRC over the payload:
+under a CRC, `(0,1)` and `(1,0)` would behave identically.  The rule
+must assign the two bytes different roles.
 
 The answer is always **three 63-byte blocks**, delivered together:
 
@@ -501,7 +519,7 @@ Block 1's four floats are:
 
 | Offset | Observed | Reading |
 |---|---|---|
-| 10 | 23.44 → 23.64 °C, drifting smoothly by ~0.01 °C/min | **the current temperature** — confirmed by its magnitude, its smoothness and its slow drift |
+| 10 | 23.44 → 23.64 → 24.03 °C, drifting smoothly by ~0.01 °C/min | **the current temperature** — confirmed by its magnitude, its smoothness and its slow drift |
 | 14 | ~-45, jumping randomly by ±1.5 between polls | a **second sensor with nothing connected** to it: noise, not a setpoint |
 | 18 | 0.7000, constant | unknown; provisionally "rate" |
 | 22 | 0.3500, constant | unknown; provisionally "limit" |
@@ -511,6 +529,32 @@ The last two are named by analogy with the Linksys32 vocabulary
 move, so nothing has confirmed what they are.
 
 The poll frame is implemented in `linkam/t95.py:build_status_poll`.
+
+### 5.6a One gate value that behaves differently: 0x52
+
+Walking the first byte from 0x00 upwards, with a liveness poll after
+every frame:
+
+* `0x00`–`0x51`: the usual three-block status.
+* **`0x52`: the device replies with ONE block — type 1, the temperature
+  block — and then stops servicing its OUT endpoint entirely.**  The
+  liveness poll immediately afterwards fails.
+
+So `0x52` starts something the firmware cannot complete: it answers
+part of a response and then wedges.  Two readings fit:
+
+* it is a command that needs **more input from the host** (a
+  multi-frame exchange), and our next frame was not the continuation it
+  wanted; or
+* it is a command that reads a channel the firmware cannot service —
+  plausible given that the second sensor channel reads as noise, i.e.
+  nothing is connected to it — and the firmware hangs on it.
+
+Both are testable, but each attempt costs a power cycle (§5.8), so
+this is a lead to follow, not something to brute-force blindly.
+
+`0x53` and above have not been characterised: the scan stopped at the
+wedge.
 
 ### 5.7 Still UNVERIFIED for the T95
 
