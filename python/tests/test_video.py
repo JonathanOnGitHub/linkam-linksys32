@@ -56,12 +56,12 @@ def test_the_lettering_is_antialiased(frame):
     assert len(values) > 4, "there are shades between the letters"
 
 
-def test_there_is_nothing_behind_the_letters():
-    """No shadow and no outline: the ink stops at the glyphs.
+def test_the_numbers_sit_on_a_flat_plate():
+    """A flat panel behind the letters, not a blur under them.
 
-    The frame is a mid grey, so that a shadow -- which is darker than
-    the picture -- would show up as ink outside the letters.  The ink has
-    to be confined to where the glyphs are.
+    The panel is what makes white text readable against a bright
+    picture.  It has to be flat: a shadow would be a blur, and a blur
+    shows as a gradient, not as one value.
     """
     pytest.importorskip("PIL")
     from linkam.video import _load_font, _SANS_FONTS
@@ -73,23 +73,16 @@ def test_there_is_nothing_behind_the_letters():
     bright = np.full((480, 640, 3), 200, dtype=np.uint8)
     annotate(bright, temperature_c=95.25, when=time.time())
 
-    # The temperature's neighbourhood.  The clock is at the other corner,
-    # so it is not in the way.  Any change here that is not the glyphs
-    # themselves is something drawn behind them.
-    diff = np.abs(bright.astype(int) - 200).max(axis=2)
-    region = diff[0:46, 440:640]
-    changed = region > 0
-    rows = np.where(changed.any(axis=1))[0]
-    cols = np.where(changed.any(axis=0))[0]
-    assert len(rows) and len(cols), "there is lettering"
-
-    # The temperature is drawn flush to the right margin and the top.
-    margin = max(10, round(480 * 0.022))
     bbox = font.getbbox("95.25 °C")
-    assert rows.min() >= margin - 2, "the top of the letters"
-    assert rows.max() <= margin + (bbox[3] - bbox[1]) + 2, "the bottom of them"
-    assert 440 + cols.max() <= 640 - margin + 2, "the right of the letters"
-    assert 440 + cols.min() >= 640 - margin - (bbox[2] - bbox[0]) - 2, "the left of them"
+    margin = max(10, round(480 * 0.022))
+    left = 640 - margin - (bbox[2] - bbox[0])
+    top = margin
+
+    # A strip just above the letters: the panel, and nothing else.
+    strip = bright[top - 3 : top - 1, left + 12 : left + 40].max(axis=2)
+    assert (strip < 200).all(), "the panel is there"
+    assert strip.std() < 1.0, "and it is flat, not a blur"
+    assert strip.max() > 40, "and the picture shows through it"
 
 
 def test_the_frame_is_not_changed_where_nothing_is_written(frame):

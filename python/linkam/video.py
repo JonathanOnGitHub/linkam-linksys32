@@ -1117,6 +1117,11 @@ _MONO_FONTS = (
 #: The fonts that have been found, so the disk is not searched every frame.
 _font_cache: dict = {}
 
+#: How opaque the panel behind the lettering is, out of 255.  It has to be
+#: enough to hold white text against a bright picture, and light enough
+#: that the picture still shows through.
+PLATE_ALPHA = 115
+
 
 def _load_font(candidates, size: int):
     """The first of `candidates` that is on the machine, at `size`.
@@ -1155,10 +1160,12 @@ def _load_font(candidates, size: int):
 
 
 def _draw_text(image, text, font, x, y, align="left", valign="top", colour=(255, 255, 255)):
-    """Draw `text` onto the frame.
+    """Draw `text` onto the frame, on a translucent plate.
 
-    Plain lettering, with nothing behind it: a shadow or an outline
-    makes the numbers heavier than they need to be.
+    The plate is a dark, half-transparent panel behind the lettering.
+    It is what makes white text readable against a bright picture,
+    without putting a shadow under the letters: the panel is flat, so
+    the type stays clean.
     """
     import numpy as np
     from PIL import Image, ImageDraw
@@ -1172,17 +1179,27 @@ def _draw_text(image, text, font, x, y, align="left", valign="top", colour=(255,
     if tw <= 0 or th <= 0:
         return
 
-    # The text's own origin, so the glyphs sit where they should.
-    ox, oy = -bbox[0], -bbox[1]
+    # The panel's margin, and how dark it is.
+    pad = max(2, round(h * 0.009))
+    size = (tw + pad * 2, th + pad * 2)
 
-    layer = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
-    ImageDraw.Draw(layer).text((ox, oy), text, font=font, fill=colour + (255,))
+    layer = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    try:
+        draw.rounded_rectangle(
+            [0, 0, size[0] - 1, size[1] - 1], radius=pad, fill=(0, 0, 0, PLATE_ALPHA)
+        )
+    except AttributeError:  # pragma: no cover - Pillow before 8.2
+        draw.rectangle([0, 0, size[0] - 1, size[1] - 1], fill=(0, 0, 0, PLATE_ALPHA))
+
+    # The text's own origin, so the glyphs sit where they should.
+    draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=colour + (255,))
 
     # Where the text goes.
     left = x - tw if align == "right" else x
     top = y if valign == "top" else y - th
-    x0 = left
-    y0 = top
+    x0 = left - pad
+    y0 = top - pad
 
     # Only the block the text covers is touched.
     cx0 = max(0, x0)
