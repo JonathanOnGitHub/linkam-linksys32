@@ -40,8 +40,13 @@ cd ~/Documents/Nottingham/Research/Linkam/linkam-linksys32/python
 .venv/bin/python -m linkam.cli read --hid --count 60 --interval 1
 
 # 4. or use the web GUI: live temperature, ramps, and a CSV
-.venv/bin/python -m linkam.webapp --hid     # then open http://localhost:8765/
+.venv/bin/python -m linkam.webapp --hid     # then open the URL it prints
 ```
+
+> **The web GUI listens on IPv4 *and* IPv6.**  `localhost` resolves to
+> `::1` first on this machine, so an IPv4-only server is unreachable
+> under that name.  If the page does not come up, open the numeric
+> address the server prints (`http://127.0.0.1:8765/`).
 
 > **One process at a time.**  The T95's reply blocks are
 > indistinguishable from one poll to the next, so two processes polling

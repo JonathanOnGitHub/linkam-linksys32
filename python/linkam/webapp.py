@@ -60,6 +60,7 @@ import csv
 import json
 import logging
 import queue
+import socket
 import threading
 import time
 from datetime import datetime
@@ -701,10 +702,103 @@ def _index_html() -> bytes:
     return (Path(__file__).parent / "static" / "index.html").read_bytes()
 
 
-def make_server(controller: StageController, host: str = "127.0.0.1", port: int = 8765):
-    """Build the HTTP server for `controller`."""
+def _bind_addresses(host: str) -> list[tuple[int, str]]:
+    """The address families and addresses to listen on.
+
+    ``localhost`` is not one address.  On this machine ``getent ahosts
+    localhost`` returns **``::1`` first**, and a server that listens
+    only on ``127.0.0.1`` is unreachable under that name -- ``curl -6
+    http://localhost:8765/`` is refused, and a browser that tries
+    IPv6 first may show nothing at all.  So the loopback case listens
+    on **both** ``127.0.0.1`` and ``::1``.
+    """
+    if host in ("", "localhost", "loopback"):
+        return [
+            (socket.AF_INET, "127.0.0.1"),
+            (socket.AF_INET6, "::1"),
+        ]
+    if host == "0.0.0.0":
+        return [(socket.AF_INET, "0.0.0.0")]
+    if host == "::":
+        return [(socket.AF_INET6, "::")]
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return [(socket.AF_INET, host)]
+    out: list[tuple[int, str]] = []
+    for family, _type, _proto, _canon, sockaddr in infos:
+        address = sockaddr[0]
+        if family == socket.AF_INET6 and address.startswith("::ffff:"):
+            continue  # an IPv4 address in IPv6 form; the IPv4 socket covers it
+        if (family, address) not in out:
+            out.append((family, address))
+    return out or [(socket.AF_INET, host)]
+
+
+def make_servers(
+    controller: StageController,
+    host: str = "localhost",
+    port: int = 8765,
+) -> list[ThreadingHTTPServer]:
+    """Build the HTTP servers for `controller`.
+
+    Returns one server per address to listen on.  On the loopback
+    addresses that is two -- an IPv4 and an IPv6 one -- because
+    ``localhost`` may resolve to either.
+    """
     handler = type("_BoundHandler", (_Handler,), {"controller": controller})
-    return ThreadingHTTPServer((host, port), handler)
+    servers: list[ThreadingHTTPServer] = []
+    for family, address in _bind_addresses(host):
+        # Port 0 means "any free port", and each socket would then pick
+        # a *different* one -- so the first port chosen is reused for the
+        # rest, which keeps the pair answering on the same address.
+        bind_port = port
+        if family == socket.AF_INET6:
+            class _V6Server(ThreadingHTTPServer):
+                address_family = socket.AF_INET6
+
+            server = _V6Server((address, bind_port), handler, bind_and_activate=False)
+            try:
+                server.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                server.server_bind()
+                server.server_activate()
+            except OSError:
+                # No IPv6 on this machine; the IPv4 listener is enough.
+                server.server_close()
+                continue
+        else:
+            server = ThreadingHTTPServer((address, bind_port), handler)
+        servers.append(server)
+        if port == 0:
+            port = server.server_address[1]
+    return servers
+
+
+def make_server(controller: StageController, host: str = "localhost", port: int = 8765):
+    """Build a single HTTP server for `controller`.
+
+    Kept for the tests and for anyone who wants one server rather than
+    a pair.
+    """
+    return make_servers(controller, host, port)[0]
+
+
+def _urls(servers, host: str, port: int) -> list[str]:
+    """The URLs a browser can actually use."""
+    out = []
+    for server in servers:
+        address = server.server_address[0]
+        if address == "0.0.0.0":
+            out.append(f"http://127.0.0.1:{port}/")
+            out.append(f"http://[::1]:{port}/")
+            out.append(f"http://<this machine>:{port}/")
+        elif address == "::":
+            out.append(f"http://[::1]:{port}/")
+        elif ":" in address:
+            out.append(f"http://[{address}]:{port}/")
+        else:
+            out.append(f"http://{address}:{port}/")
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -722,9 +816,11 @@ def main(argv=None) -> int:
                         help="serial port for the RS-232 programmers")
     parser.add_argument("--baud", type=int, default=9600,
                         help="baud rate for the serial link")
-    parser.add_argument("--host", default="127.0.0.1",
-                        help="address to listen on (use 0.0.0.0 to reach it "
-                             "from another machine)")
+    parser.add_argument("--host", default="localhost",
+                        help="address to listen on.  The default listens on "
+                             "both 127.0.0.1 and ::1, because 'localhost' "
+                             "may resolve to either.  Use 0.0.0.0 to reach "
+                             "it from another machine")
     parser.add_argument("--http-port", type=int, default=8765,
                         help="port to listen on")
     parser.add_argument("--out", default=None,
@@ -761,19 +857,38 @@ def main(argv=None) -> int:
         print(f"could not open the instrument: {exc}", flush=True)
         return 1
 
-    server = make_server(controller, args.host, args.http_port)
-    url = f"http://{'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host}:{args.http_port}/"
-    print(f"Linkam web UI: {url}", flush=True)
+    servers = make_servers(controller, args.host, args.http_port)
+    if not servers:
+        print("could not listen on any address", flush=True)
+        controller.close()
+        return 1
+
+    print("Linkam web UI:", flush=True)
+    for url in _urls(servers, args.host, args.http_port):
+        print(f"    {url}", flush=True)
+    if args.host in ("", "localhost", "127.0.0.1", "::1"):
+        print(
+            "    (reachable from another machine with --host 0.0.0.0)",
+            flush=True,
+        )
     print(f"recording to  {controller._csv_path}", flush=True)
     print("press Ctrl-C to stop", flush=True)
 
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in servers
+    ]
+    for thread in threads:
+        thread.start()
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print("\nstopping", flush=True)
     finally:
-        server.shutdown()
-        server.server_close()
+        for server in servers:
+            server.shutdown()
+            server.server_close()
         controller.close()
     return 0
 

@@ -54,7 +54,8 @@
   .readout .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
   .readout .v { font-family: var(--mono); font-size: 17px; margin-top: 2px; }
   .readout .v.small { font-size: 14px; color: var(--dim); }
-  canvas { width: 100%; height: 150px; display: block; margin-top: 16px; background: var(--panel2); border-radius: 8px; }
+  canvas { width: 100%; height: 190px; display: block; margin-top: 16px; background: var(--panel2); border-radius: 8px; }
+  .caption { font-size: 12px; color: var(--dim); margin-top: 6px; font-family: var(--mono); }
 
   label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin-bottom: 5px; }
   .field { margin-bottom: 12px; }
@@ -116,9 +117,11 @@
         <div class="readout"><div class="k">Phase detail</div><div class="v small" id="detail">--</div></div>
       </div>
       <canvas id="spark"></canvas>
-      <p class="hint">TC2 is the second thermocouple channel. If nothing is
-      attached to it the reading is noise — the stage temperature is the
-      large number above.</p>
+      <p class="caption" id="sparkinfo"></p>
+      <p class="hint">The trace is the stage temperature against local time; the
+      dashed line is the programmed setpoint. TC2 is the second thermocouple
+      channel. If nothing is attached to it the reading is noise — the stage
+      temperature is the large number above.</p>
     </div>
   </section>
 
@@ -163,6 +166,79 @@ const state = {
   temperature_c: null, sensor2_c: null, target_c: null, rate_c_per_min: null,
   trend: [], running: false,
 };
+
+// The margins of the plot, in CSS pixels: they hold the axis numbers.
+const AXIS = { left: 58, right: 14, top: 18, bottom: 22 };
+const PLOT_FONT = '10px ui-monospace, "SF Mono", Menlo, Consolas, monospace';
+// Tick spacings that land on whole minutes, so the clock reads cleanly.
+const TIME_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800,
+                    3600, 7200, 10800, 21600, 43200, 86400];
+
+/* The spacing of the temperature ticks: 1, 2, 2.5, 5 or 10 times a power
+   of ten, so the numbers on the axis are round ones. */
+function niceStep(span, want) {
+  if (!(span > 0)) return 1;
+  const raw = span / Math.max(want, 1);
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  const mult = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+  return mult * mag;
+}
+
+/* The temperature ticks, and the spacing they were built from. */
+function temperatureTicks(lo, hi, want) {
+  const step = niceStep(hi - lo, want);
+  const ticks = [];
+  const first = Math.ceil((lo - 1e-9) / step) * step;
+  for (let v = first; v <= hi + 1e-9 && ticks.length < 24; v += step) ticks.push(v);
+  return { step, ticks };
+}
+
+/* The time ticks, and the spacing they were built from. */
+function timeTicks(t0, t1, want) {
+  const span = Math.max(t1 - t0, 1);
+  let step = TIME_STEPS[TIME_STEPS.length - 1];
+  for (const s of TIME_STEPS) {
+    if (s >= span / want) { step = s; break; }
+  }
+  const ticks = [];
+  const first = Math.ceil(t0 / step) * step;
+  for (let t = first; t <= t1 + 1e-9 && ticks.length < 24; t += step) ticks.push(t);
+  return { step, ticks };
+}
+
+/* A tick's time, as a clock.  A window of a day or more gets a date too. */
+function clockLabel(t, span) {
+  const d = new Date(t * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  const hms = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  if (span >= 86400) return `${p(d.getDate())}/${p(d.getMonth() + 1)} ${hms.slice(0, 5)}`;
+  return hms;
+}
+
+/* How many decimals a tick of this spacing needs. */
+function tickDecimals(step) {
+  for (let d = 0; d <= 4; d++) {
+    const scaled = step * Math.pow(10, d);
+    if (Math.abs(scaled - Math.round(scaled)) < 1e-9) return d;
+  }
+  return 4;
+}
+
+/* A tick's temperature, with as many decimals as the spacing needs. */
+function tempLabel(v, step) {
+  return v.toFixed(tickDecimals(step));
+}
+
+/* A length of time, in words. */
+function formatSpan(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h) return `${h} h ${m} min`;
+  if (m) return `${m} min ${s % 60} s`;
+  return `${s} s`;
+}
 
 function fmt(v, digits) {
   return (v === null || v === undefined || Number.isNaN(v)) ? "--" : Number(v).toFixed(digits);
@@ -221,34 +297,82 @@ function draw() {
   const c = $("spark");
   const dpr = window.devicePixelRatio || 1;
   const w = c.clientWidth, h = c.clientHeight;
-  if (c.width !== w * dpr || c.height !== h * dpr) {
-    c.width = w * dpr; c.height = h * dpr;
+  if (!w || !h) return;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
   }
   const g = c.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
+
+  // The plot area: the margins hold the numbers.
+  const plot = {
+    x0: AXIS.left,
+    x1: Math.max(w - AXIS.right, AXIS.left + 20),
+    y0: AXIS.top,
+    y1: Math.max(h - AXIS.bottom, AXIS.top + 20),
+  };
+
   const pts = state.trend.filter(p => p[1] !== null && p[1] !== undefined);
-  if (pts.length < 2) return;
+  if (pts.length < 2) {
+    g.fillStyle = "#9aa3b2"; g.font = PLOT_FONT;
+    g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText("waiting for samples", (plot.x0 + plot.x1) / 2, (plot.y0 + plot.y1) / 2);
+    $("sparkinfo").textContent = "";
+    return;
+  }
 
   let lo = Infinity, hi = -Infinity;
   for (const p of pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  const dataLo = lo, dataHi = hi;
   const target = state.target_c;
-  if (typeof target === "number" && Number.isFinite(target)) {
+  const hasTarget = typeof target === "number" && Number.isFinite(target);
+  if (hasTarget) {
     lo = Math.min(lo, target); hi = Math.max(hi, target);
   }
   if (hi - lo < 1) { hi += 0.5; lo -= 0.5; }
   const pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
 
   const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
-  const X = (t) => ((t - t0) / (t1 - t0 || 1)) * (w - 4) + 2;
-  const Y = (v) => h - 3 - ((v - lo) / (hi - lo)) * (h - 6);
+  const X = (t) => plot.x0 + ((t - t0) / (t1 - t0 || 1)) * (plot.x1 - plot.x0);
+  const Y = (v) => plot.y1 - ((v - lo) / (hi - lo)) * (plot.y1 - plot.y0);
+
+  // The scales: a grid with the numbers on it.
+  g.font = PLOT_FONT;
+  g.strokeStyle = "rgba(50,55,66,.6)";
+  g.fillStyle = "#9aa3b2";
+
+  const yTicks = temperatureTicks(lo, hi, 5);
+  g.textAlign = "right"; g.textBaseline = "middle";
+  for (const v of yTicks.ticks) {
+    const y = Y(v);
+    g.beginPath(); g.moveTo(plot.x0, y); g.lineTo(plot.x1, y); g.stroke();
+    g.fillText(tempLabel(v, yTicks.step), plot.x0 - 7, y);
+  }
+
+  const span = t1 - t0;
+  const xTicks = timeTicks(t0, t1, 5);
+  g.textAlign = "center"; g.textBaseline = "top";
+  for (const t of xTicks.ticks) {
+    const x = X(t);
+    g.beginPath(); g.moveTo(x, plot.y0); g.lineTo(x, plot.y1); g.stroke();
+    g.fillText(clockLabel(t, span), x, plot.y1 + 6);
+  }
+
+  // The units.
+  g.textAlign = "right"; g.textBaseline = "top";
+  g.fillText("°C", plot.x0 - 7, 2);
 
   // the target line
-  if (typeof target === "number" && Number.isFinite(target)) {
+  if (hasTarget) {
+    const y = Y(target);
     g.strokeStyle = "rgba(77,163,255,.45)";
     g.setLineDash([4, 4]); g.beginPath();
-    g.moveTo(0, Y(target)); g.lineTo(w, Y(target)); g.stroke();
+    g.moveTo(plot.x0, y); g.lineTo(plot.x1, y); g.stroke();
     g.setLineDash([]);
+    g.fillStyle = "#4da3ff";
+    g.textAlign = "right"; g.textBaseline = "bottom";
+    g.fillText(`target ${tempLabel(target, 0.1)} °C`, plot.x1 - 2, y - 3);
   }
 
   g.strokeStyle = "#4da3ff"; g.lineWidth = 2;
@@ -260,6 +384,12 @@ function draw() {
   const last = pts[pts.length - 1];
   g.fillStyle = "#4da3ff";
   g.beginPath(); g.arc(X(last[0]), Y(last[1]), 3.5, 0, 6.284); g.fill();
+
+  // The window and the range, in words, for when the plot is too small
+  // to read the numbers off.
+  $("sparkinfo").textContent =
+    `${clockLabel(t0, span)} – ${clockLabel(t1, span)} · ${formatSpan(span)} · ` +
+    `${tempLabel(dataLo, 0.1)}–${tempLabel(dataHi, 0.1)} °C`;
 }
 
 async function post(url, body) {

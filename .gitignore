@@ -4,6 +4,10 @@
 # bulk string dumps. They are deliberately not published.
 backup/
 
+# Recorded runs: the telemetry CSVs and the programme results.  These
+# are data, not source.
+results/
+
 # Python
 __pycache__/
 *.py[cod]

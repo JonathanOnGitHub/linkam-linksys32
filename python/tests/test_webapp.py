@@ -311,6 +311,53 @@ def test_the_simulator_can_drive_the_gui(tmp_path):
         ctl.close()
 
 
+def test_the_loopback_servers_listen_on_both_families(controller):
+    """`localhost` may resolve to ::1, so both must be served.
+
+    On this machine `getent ahosts localhost` returns ::1 first, and a
+    server that listened only on 127.0.0.1 was unreachable under the
+    name "localhost": `curl -6 http://localhost:8765/` was refused.
+    """
+    from linkam.webapp import make_servers
+
+    servers = make_servers(controller, "localhost", 0)
+    try:
+        assert len(servers) >= 1
+        addresses = {s.server_address[0] for s in servers}
+        assert "127.0.0.1" in addresses
+        # The port must be the same on both, or the two are different
+        # servers and a browser would land on only one of them.
+        ports = {s.server_address[1] for s in servers}
+        assert len(ports) == 1
+    finally:
+        for server in servers:
+            server.server_close()
+
+
+def test_both_loopback_families_answer(controller):
+    from linkam.webapp import make_servers
+
+    servers = make_servers(controller, "localhost", 0)
+    threads = []
+    try:
+        for server in servers:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            threads.append(thread)
+        port = servers[0].server_address[1]
+        for address in ("127.0.0.1", "[::1]"):
+            try:
+                status, body = get(f"http://{address}:{port}/")
+            except Exception:
+                continue  # no IPv6 on this machine
+            assert status == 200
+            assert b"Linkam hot stage" in body
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+
+
 def test_the_page_is_served(server):
     status, body = get(server + "/")
     assert status == 200

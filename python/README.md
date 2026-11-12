@@ -254,11 +254,20 @@ it happens.
 # start it -- this opens the instrument
 python -m linkam.webapp --hid
 
-# then open http://localhost:8765/
+# then open http://127.0.0.1:8765/
 
 # or try it with no hardware at all -- nothing is moved
 python -m linkam.webapp --simulate
 ```
+
+It listens on **both** `127.0.0.1` and `::1`, and prints the URLs it is
+serving.  Both matter: on this machine `getent ahosts localhost`
+returns `::1` **first**, so a server that listened only on IPv4 was
+unreachable under the name `localhost` — `curl -6 http://localhost:8765/`
+was refused, and a browser could show nothing at all.  If the page still
+does not come up, use the numeric address the server prints, and check
+that you are on the same machine (`--host 0.0.0.0` makes it reachable
+from another one).
 
 It needs no web framework — it is the standard library's
 `http.server` — so nothing has to be installed.
