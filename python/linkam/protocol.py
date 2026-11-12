@@ -270,6 +270,20 @@ class LinkamProgrammer:
     variant and reports which one the hardware answers.
     """
 
+    #: Whether the instrument reports a rate of zero once it has arrived
+    #: at its limit and stopped moving.
+    #:
+    #: The ASCII programmers do, and that is the cheapest way to tell
+    #: that the temperature has stopped moving.  The T95 does not: it
+    #: holds the rate it was programmed with, whatever it is doing, so
+    #: there the decision has to be made from the measured temperature.
+    #: See :class:`linkam.protocol.HidProgrammer`.
+    REPORTS_ZERO_RATE_WHILE_HOLDING = True
+
+    #: The smallest temperature slope (C/min) that counts as "still
+    #: moving" when there is no rate to compare against.
+    MIN_MOVING_SLOPE_C_PER_MIN = 0.5
+
     def __init__(
         self,
         port: str,
@@ -772,28 +786,49 @@ class LinkamProgrammer:
             if stable_since is None:
                 # Still settling: has the temperature stopped moving?
                 #
-                # The reported rate is the strongest signal: when the
-                # programmer has reached the limit it reports no rate (or
-                # zero), which means it is holding.  When it does not
-                # report a rate, fall back to comparing the measured
-                # movement against what the ramp *would* have produced.
+                # Two ways to answer that, and which one is right
+                # depends on the link:
+                #
+                # * The ASCII programmers report a rate of zero once they
+                #   have arrived at their limit and are holding, so the
+                #   reported rate is the cheapest signal.
+                # * The T95 does not: it holds the rate it was
+                #   programmed with, whatever it is doing, so a reported
+                #   rate of 2 C/min means nothing about whether the
+                #   temperature is still climbing.  There the decision
+                #   has to be made from the measured temperature.
                 rate = st.rate
-                if rate is not None:
+                if rate is not None and self.REPORTS_ZERO_RATE_WHILE_HOLDING:
                     # The programmer reports its rate; at the limit it
                     # reports no rate (or zero), which means it is
                     # holding.
                     still_moving = abs(rate) > 0.01
                 else:
-                    # No rate reported: fall back to comparing the
-                    # measured movement against a fixed threshold.
-                    drift = abs(temp - band_first)
-                    still_moving = drift > self.MAX_HOLD_DRIFT_C
+                    # Judge the measured slope: a temperature that is
+                    # still ramping keeps the slope at the rate it was
+                    # given, and one that has arrived and is holding
+                    # flattens out.
+                    elapsed_min = (now - band_entered) / 60.0
+                    if elapsed_min <= 0:
+                        still_moving = True
+                    else:
+                        slope = abs(temp - band_first) / elapsed_min
+                        threshold = (
+                            abs(rate) * 0.5
+                            if rate
+                            else self.MIN_MOVING_SLOPE_C_PER_MIN
+                        )
+                        still_moving = slope > threshold
 
                 if still_moving:
-                    # Still ramping through the band -- restart the
-                    # settling window.
-                    band_entered = now
-                    band_first = temp
+                    # Still ramping through the band.  Restart the
+                    # settling window, but only once it is long enough
+                    # to give a meaningful slope: a window of a few
+                    # hundred milliseconds says more about noise than
+                    # about the ramp.
+                    if now - band_entered >= settle_s:
+                        band_entered = now
+                        band_first = temp
                 elif now - band_entered >= settle_s:
                     stable_since = now
                     log.info(
@@ -1023,6 +1058,12 @@ class HidProgrammer(LinkamProgrammer):
 
     #: How often to poll the T95 for status.
     POLL_PERIOD_S = 0.5
+
+    #: The T95 does not report a rate of zero when it is holding: it
+    #: keeps reporting the rate it was programmed with.  So the settle
+    #: detection has to be made from the measured temperature, not from
+    #: the reported rate.
+    REPORTS_ZERO_RATE_WHILE_HOLDING = False
 
     @property
     def programmed_rate(self) -> float | None:
