@@ -72,7 +72,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .camera import CameraFeed
 from .programme import Programme, ProgrammeRunner, Step
@@ -189,12 +189,25 @@ class StageController:
         itself (see :meth:`open`).
     output_dir:
         Where the CSV and the programme results are written.  Defaults
-        to ``results/webui/<timestamp>``.
+        to ``results/webui/<timestamp>``.  The user can change it from
+        the page (see :meth:`set_output_dir`).
     camera:
         The camera feed -- a :class:`~linkam.camera.CameraFeed`.  It is
         optional: without one the GUI still runs, and the temperature
         programme is unaffected.
     """
+
+    #: The columns of the telemetry CSV.
+    CSV_COLUMNS = [
+        "timestamp",
+        "elapsed_s",
+        "temperature_c",
+        "sensor2_c",
+        "programmed_rate_c_per_min",
+        "programmed_setpoint_c",
+        "phase",
+        "event",
+    ]
 
     def __init__(
         self,
@@ -239,6 +252,71 @@ class StageController:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             self.output_dir = Path("results") / "webui" / stamp
 
+    # -- the recording ------------------------------------------------------ #
+    def _open_csv(self, directory: Path) -> None:
+        """Open the telemetry CSV in `directory`."""
+        directory.mkdir(parents=True, exist_ok=True)
+        self._csv_path = directory / "telemetry.csv"
+        self._csv_file = self._csv_path.open("w", newline="")
+        self._csv_writer = csv.writer(self._csv_file)
+        self._csv_writer.writerow(self.CSV_COLUMNS)
+        self._csv_file.flush()
+
+    def _close_csv(self) -> None:
+        """Close the telemetry CSV, if it is open."""
+        if self._csv_file is None:
+            return
+        try:
+            self._csv_file.flush()
+            self._csv_file.close()
+        except Exception:  # pragma: no cover
+            log.exception("could not close the CSV file")
+        self._csv_file = None
+        self._csv_writer = None
+
+    def set_output_dir(self, directory) -> Path:
+        """Change where the experiment's data is written.
+
+        The CSV moves with it: what has been recorded so far stays where
+        it was, and a new file is started in the new folder.  The video
+        goes there too.
+
+        A recording in progress is not moved -- it is refused, because
+        stopping the video in the middle of a programme is worse than
+        making the user wait.
+        """
+        directory = Path(directory)
+        with self._lock:
+            if self._camera is not None and self._camera.state()["recording"]:
+                raise RuntimeError(
+                    "the video is being recorded -- stop it before changing "
+                    "the folder"
+                )
+            self._close_csv()
+            self.output_dir = directory
+            self._open_csv(directory)
+            if self._camera is not None:
+                self._camera.set_output_dir(directory)
+        self._emit(
+            "recording",
+            message=f"the data is now going to {directory}",
+        )
+        log.info("recording to %s", self._csv_path)
+        return directory
+
+    def default_name(self, prefix: str = "") -> str:
+        """The name of the experiment's folder.
+
+        A sensible default -- the date and the time -- which the user
+        can give a prefix to.
+        """
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        name = f"experiment-{stamp}"
+        prefix = (prefix or "").strip()
+        if prefix:
+            name = f"{prefix}-{name}"
+        return name
+
     # -- lifecycle --------------------------------------------------------- #
     def open(self) -> None:
         """Open the instrument and start recording."""
@@ -248,22 +326,7 @@ class StageController:
             else:
                 self._programmer = LinkamProgrammer(self._serial_port, self._baud)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._csv_path = self.output_dir / "telemetry.csv"
-        self._csv_file = self._csv_path.open("w", newline="")
-        self._csv_writer = csv.writer(self._csv_file)
-        self._csv_writer.writerow(
-            [
-                "timestamp",
-                "elapsed_s",
-                "temperature_c",
-                "sensor2_c",
-                "programmed_rate_c_per_min",
-                "programmed_setpoint_c",
-                "phase",
-                "event",
-            ]
-        )
-        self._csv_file.flush()
+        self._open_csv(self.output_dir)
 
         self._programmer.on_telemetry(self._on_telemetry)
         self._programmer.open()
@@ -487,6 +550,7 @@ class StageController:
                 "recording": self._recording,
                 "csv_path": str(self._csv_path) if self._csv_path else None,
                 "output_dir": str(self.output_dir),
+                "default_name": self.default_name(),
                 "running": self._runner_thread is not None
                 and self._runner_thread.is_alive(),
                 "trend": [[t, v] for t, v in self._trend],
@@ -717,6 +781,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_csv()
         elif path == "/api/video":
             self._video_stream()
+        elif path == "/api/dirs":
+            query = parse_qs(urlparse(self.path).query)
+            self._send_dirs(query.get("path", [""])[0])
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -751,6 +818,8 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/video":
                 self._send_json(200, self._video_command(body, controller))
+            elif path == "/api/output":
+                self._send_json(200, self._output_command(body, controller))
             else:
                 self._send_json(404, {"error": "not found"})
         except KeyError as exc:
@@ -842,6 +911,58 @@ class _Handler(BaseHTTPRequestHandler):
                 return controller.start_video_recording()
             return controller.stop_video_recording()
         raise ValueError("say what to do: 'record' or 'manual'")
+
+    def _output_command(self, body: dict, controller) -> dict:
+        """Where the experiment's data goes.
+
+        The folder is chosen by the user and the name is a sensible
+        default -- the date and the time -- which the user can give a
+        prefix to.  The name is taken as the user has it, so the folder
+        that is shown is the folder that is made.
+        """
+        folder = str(body.get("folder", "")).strip()
+        if not folder:
+            raise ValueError("say which folder to use")
+        name = str(body.get("name", "")).strip()
+        if not name:
+            name = controller.default_name()
+        if "/" in name or "\\" in name or name in (".", ".."):
+            raise ValueError("that is not a usable name for a folder")
+        directory = Path(folder) / name
+        controller.set_output_dir(directory)
+        return {
+            "ok": True,
+            "output_dir": str(directory),
+            "name": name,
+            "csv_path": str(controller._csv_path),
+        }
+
+    # -- the folders --------------------------------------------------------- #
+    def _send_dirs(self, query: str) -> None:
+        """The folders under a path, for the save-folder picker."""
+        try:
+            path = Path(query or ".").expanduser()
+            resolved = path.resolve()
+            entries = sorted(
+                p.name
+                for p in resolved.iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+            )
+        except FileNotFoundError:
+            self._send_json(404, {"error": f"there is no folder called {query}"})
+            return
+        except OSError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        parent = str(resolved.parent) if resolved != resolved.parent else None
+        self._send_json(
+            200,
+            {
+                "path": str(resolved),
+                "parent": parent,
+                "dirs": entries,
+            },
+        )
 
     # -- the recording ------------------------------------------------------ #
     def _send_csv(self) -> None:

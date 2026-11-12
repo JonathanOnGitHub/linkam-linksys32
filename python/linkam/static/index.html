@@ -5,172 +5,309 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Linkam hot stage</title>
 <style>
+  /* ---------------------------------------------------------------------
+     The University of Nottingham palette.
+
+     Nottingham Blue is the primary colour and carries all the text; the
+     supporting colours are accents and are used sparingly, no more than
+     two in any one view.  Every pairing below is one the University's
+     own colour accessibility grid passes: body text is AAA (15.4:1),
+     captions AAA (8.1:1), and the badges AA (6.4:1 and better).
+     --------------------------------------------------------------------- */
   :root {
-    --bg: #14161a;
-    --panel: #1c1f25;
-    --panel2: #23272f;
-    --line: #323742;
-    --text: #e6e8ec;
-    --dim: #9aa3b2;
-    --accent: #4da3ff;
-    --good: #46c07a;
-    --warn: #e8b93b;
-    --bad: #e2553f;
+    --navy: #10263b;          /* Nottingham Blue */
+    --navy-80: #405162;       /* 80% Nottingham Blue -- captions */
+    --navy-60: #707d89;       /* 60% -- borders on white */
+    --navy-40: #9fa8b1;
+    --navy-20: #cfd4d8;       /* 20% -- hairlines */
+    --navy-5: #f3f4f5;        /* 5% -- the plot's ground */
+    --stone: #faf6ef;         /* Portland Stone */
+    --stone-40: #fdfbf9;      /* 40% Portland Stone -- page ground */
+    --white: #ffffff;
+    --red: #b91c2e;           /* Jubilee Red -- errors, the setpoint */
+    --gold: #deb406;          /* Rebel's Gold -- holding */
+    --green: #005f36;         /* Forest Green -- running */
+    --sky: #009bc1;           /* Malaysia Sky Blue -- focus */
+    /* The brand fonts are Circular (sans) and Lora (serif).  Both are
+       licensed, so the University's own system substitutes are used
+       here: Arial for the sans and Georgia for the serif. */
+    --sans: "Circular", Arial, "Helvetica Neue", Helvetica, system-ui, sans-serif;
+    --serif: "Lora", Georgia, "Times New Roman", serif;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
+
   * { box-sizing: border-box; }
+
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0;
+    background: var(--stone-40);
+    color: var(--navy);
+    font: 1rem/1.5 var(--sans);
   }
+
+  /* A keyboard user's first stop is the content, not the header. */
+  .skip {
+    position: absolute; left: -9999px; top: 0; z-index: 100;
+    padding: 10px 16px; background: var(--navy); color: var(--white);
+    border-radius: 0 0 8px 0;
+  }
+  .skip:focus { left: 0; }
+
   header {
     display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-    padding: 10px 18px; background: var(--panel);
-    border-bottom: 1px solid var(--line);
+    padding: 10px 18px; background: var(--navy); color: var(--white);
+    border-bottom: 4px solid var(--gold);
   }
-  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .01em; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); display: inline-block; }
-  .dot.on { background: var(--good); }
-  .badge {
-    padding: 3px 9px; border-radius: 999px; background: var(--panel2);
-    border: 1px solid var(--line); font-size: 12px; color: var(--dim);
+  h1 { font-size: 1.0625rem; margin: 0; font-weight: 700; }
+  header a { color: var(--white); }
+  header button {
+    background: transparent; color: var(--white);
+    border-color: var(--navy-40); padding: 6px 12px;
   }
-  .badge.ramping { color: #0d1117; background: var(--accent); border-color: var(--accent); font-weight: 600; }
-  .badge.holding  { color: #0d1117; background: var(--warn); border-color: var(--warn); font-weight: 600; }
-  .badge.error, .badge.stopped { color: #fff; background: var(--bad); border-color: var(--bad); font-weight: 600; }
+  header button:hover:not(:disabled) { background: var(--navy-80); }
   .spacer { flex: 1; }
   .mono { font-family: var(--mono); }
+  .dim { color: var(--navy-80); }
+  header .dim { color: var(--navy-20); }
 
-  main { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(320px,1fr); gap: 16px; padding: 16px; align-items: start; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  /* The link state: a dot, but never the only way of saying it -- the
+     phase badge beside it carries the same information in words. */
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--red); display: inline-block;
+  }
+  .dot.on { background: var(--green); }
 
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
-  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 12px; font-weight: 600; }
+  .badge {
+    padding: 3px 10px; border-radius: 999px; background: var(--navy-80);
+    color: var(--white); font-size: 0.8125rem; font-weight: 700;
+  }
+  .badge.ramping { background: var(--green); }
+  /* Rebel's Gold takes Nottingham Blue's text, not white's: white on
+     gold is 1.97:1 and fails, navy on gold is 7.8:1 and passes. */
+  .badge.holding { background: var(--gold); color: var(--navy); }
+  .badge.error, .badge.stopped { background: var(--red); }
 
-  .temp { display: flex; align-items: baseline; gap: 10px; }
-  .temp .value { font-family: var(--mono); font-size: 64px; font-weight: 600; line-height: 1; letter-spacing: -.02em; }
-  .temp .unit { color: var(--dim); font-size: 20px; }
-  .readouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 10px 18px; margin-top: 18px; }
-  .readout .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
-  .readout .v { font-family: var(--mono); font-size: 17px; margin-top: 2px; }
-  .readout .v.small { font-size: 14px; color: var(--dim); }
-  canvas { width: 100%; height: 190px; display: block; margin-top: 16px; background: var(--panel2); border-radius: 8px; }
-  .caption { font-size: 12px; color: var(--dim); margin-top: 6px; font-family: var(--mono); }
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+    grid-template-areas:
+      "camera ramp"
+      "camera temp"
+      "log    log";
+    gap: 16px; padding: 16px; align-items: start;
+  }
+  @media (max-width: 1000px) {
+    main {
+      grid-template-columns: 1fr;
+      grid-template-areas: "camera" "temp" "ramp" "log";
+    }
+  }
 
-  /* The camera. */
+  .card {
+    background: var(--white); border: 1px solid var(--navy-60);
+    border-radius: 10px; padding: 16px;
+  }
+  .card h2 {
+    font-size: 0.9375rem; margin: 0 0 12px; font-weight: 700;
+    color: var(--navy);
+  }
+  .card h2 + h2 { margin-top: 22px; }
+
+  section.camera { grid-area: camera; }
+  section.ramp { grid-area: ramp; }
+  section.temp { grid-area: temp; }
+  section.log { grid-area: log; }
+
+  /* -- the camera ---------------------------------------------------- */
   .video-wrap {
-    position: relative; background: #0b0d10; border: 1px solid var(--line);
-    border-radius: 8px; overflow: hidden; min-height: 120px;
+    position: relative; background: var(--navy-5);
+    border: 1px solid var(--navy-60); border-radius: 8px; overflow: hidden;
+    aspect-ratio: 4 / 3; max-height: 68vh;
     display: flex; align-items: center; justify-content: center;
   }
-  .video-wrap img { display: block; max-width: 100%; max-height: 420px; width: auto; height: auto; }
+  .video-wrap img {
+    display: block; width: 100%; height: 100%; object-fit: contain;
+  }
   .video-wrap:not(.live) img { display: none; }
   .video-wrap .waiting {
-    position: absolute; font-size: 13px; color: var(--dim); text-align: center;
-    padding: 0 20px;
+    position: absolute; font-size: 0.9375rem; color: var(--navy-80);
+    text-align: center; padding: 0 20px;
   }
   .video-wrap.live .waiting { display: none; }
-  .check { display: flex; align-items: center; gap: 8px; text-transform: none;
-           letter-spacing: 0; font-size: 13px; color: var(--text); margin-bottom: 0; }
-  .check input { width: auto; margin: 0; }
-  .dot-rec { width: 9px; height: 9px; border-radius: 50%; background: var(--bad);
-             display: inline-block; vertical-align: middle; }
 
-  label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin-bottom: 5px; }
+  /* -- the temperature ------------------------------------------------ */
+  .temp { display: flex; align-items: baseline; gap: 10px; }
+  .temp .value {
+    font-family: var(--mono); font-size: 3.5rem; font-weight: 700;
+    line-height: 1; letter-spacing: -.02em;
+  }
+  .temp .unit { color: var(--navy-80); font-size: 1.25rem; }
+  .readouts {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px 18px; margin: 18px 0 0;
+  }
+  .readouts dt {
+    font-size: 0.75rem; color: var(--navy-80); font-weight: 700;
+  }
+  .readouts dd { font-family: var(--mono); font-size: 1.0625rem; margin: 2px 0 0; }
+  .readouts dd.small { font-size: 0.875rem; color: var(--navy-80); }
+
+  canvas {
+    width: 100%; height: 190px; display: block; margin-top: 16px;
+    background: var(--navy-5); border-radius: 8px;
+  }
+  .caption {
+    font-size: 0.8125rem; color: var(--navy-80); margin: 6px 0 0;
+    font-family: var(--mono);
+  }
+
+  /* -- the forms ------------------------------------------------------ */
+  label {
+    display: block; font-size: 0.8125rem; color: var(--navy-80);
+    font-weight: 700; margin-bottom: 5px;
+  }
   .field { margin-bottom: 12px; }
   input, select, textarea {
-    width: 100%; padding: 9px 10px; background: var(--panel2); color: var(--text);
-    border: 1px solid var(--line); border-radius: 7px; font-family: var(--mono); font-size: 14px;
+    width: 100%; padding: 9px 10px; background: var(--white); color: var(--navy);
+    border: 1px solid var(--navy-60); border-radius: 7px;
+    font-family: var(--mono); font-size: 0.9375rem;
   }
-  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
   textarea { resize: vertical; min-height: 58px; }
   .row { display: flex; gap: 10px; }
   .row > * { flex: 1; }
 
   button {
-    padding: 10px 14px; border-radius: 7px; border: 1px solid var(--line);
-    background: var(--panel2); color: var(--text); font-size: 14px; font-weight: 500;
-    cursor: pointer; font-family: inherit;
+    padding: 10px 14px; border-radius: 7px; border: 1px solid var(--navy-60);
+    background: var(--white); color: var(--navy); font-size: 0.9375rem;
+    font-weight: 500; cursor: pointer; font-family: inherit;
   }
-  button:hover:not(:disabled) { border-color: #4a5160; }
-  button:disabled { opacity: .4; cursor: not-allowed; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 600; }
-  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
+  button:hover:not(:disabled) { background: var(--navy-5); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.primary { background: var(--navy); border-color: var(--navy); color: var(--white); font-weight: 700; }
+  button.primary:hover:not(:disabled) { background: var(--navy-80); }
+  button.danger { background: var(--red); border-color: var(--red); color: var(--white); font-weight: 700; }
+  button.danger:hover:not(:disabled) { background: #a51828; }
   button.wide { width: 100%; }
   .actions { display: flex; gap: 10px; margin-top: 4px; }
-  .hint { font-size: 12px; color: var(--dim); margin-top: 8px; }
-  .hint.warn { color: var(--warn); }
+  .hint { font-size: 0.8125rem; color: var(--navy-80); margin: 8px 0 0; }
+  .hint.warn { color: var(--red); font-weight: 700; }
+  .check {
+    display: flex; align-items: center; gap: 8px; font-size: 0.9375rem;
+    color: var(--navy); font-weight: 500; margin-bottom: 0;
+  }
+  .check input { width: auto; margin: 0; }
+  .dot-rec {
+    width: 9px; height: 9px; border-radius: 50%; background: var(--red);
+    display: inline-block; vertical-align: middle;
+  }
 
-  #log { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; font-family: var(--mono); font-size: 12.5px; }
-  #log li { padding: 4px 0; border-bottom: 1px solid rgba(50,55,66,.5); display: flex; gap: 10px; }
-  #log .t { color: var(--dim); flex: 0 0 78px; }
-  #log .p { color: var(--accent); flex: 0 0 92px; }
-  #log li.error .p { color: var(--bad); }
-  #log li.stopped .p { color: var(--bad); }
-  a { color: var(--accent); }
+  /* -- the log -------------------------------------------------------- */
+  #log {
+    list-style: none; margin: 0; padding: 0; max-height: 260px;
+    overflow-y: auto; font-family: var(--mono); font-size: 0.8125rem;
+  }
+  #log li {
+    padding: 4px 0; border-bottom: 1px solid var(--navy-20);
+    display: flex; gap: 12px;
+  }
+  #log .t { color: var(--navy-80); flex: 0 0 78px; }
+  #log .p { color: var(--navy); flex: 0 0 110px; font-weight: 700; }
+  #log .m { flex: 1 1 auto; }
+  #log li.error .p, #log li.stopped .p { color: var(--red); }
+
+  a { color: var(--navy); }
+  a:hover { text-decoration-thickness: 2px; }
+
+  /* -- the save-folder pop-up ----------------------------------------- */
+  .modal {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(16, 38, 59, .55);
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .modal[hidden] { display: none; }
+  .modal-box {
+    background: var(--white); border-radius: 12px; padding: 22px;
+    max-width: 560px; width: 100%; max-height: 90vh; overflow-y: auto;
+    border: 1px solid var(--navy-20);
+  }
+  .modal-box h2 { font-size: 1.125rem; margin: 0 0 6px; }
+  .dirlist {
+    max-height: 190px; overflow-y: auto; margin: 0 0 14px;
+    border: 1px solid var(--navy-60); border-radius: 7px; background: var(--stone-40);
+  }
+  .dirlist button {
+    display: block; width: 100%; text-align: left; border: 0;
+    border-radius: 0; background: transparent; padding: 7px 12px;
+    font-family: var(--mono); font-size: 0.875rem;
+  }
+  .dirlist button:hover { background: var(--navy-5); }
+  .dirlist .up { font-weight: 700; color: var(--navy); }
+
+  /* -- keyboard and motion -------------------------------------------- */
+  :focus-visible {
+    outline: 3px solid var(--sky); outline-offset: 2px; border-radius: 4px;
+  }
+  input:focus-visible, textarea:focus-visible { outline-offset: 1px; }
+  /* On the navy header the sky ring would be lost, so it is white. */
+  header :focus-visible { outline-color: var(--white); }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+  @media (forced-colors: active) {
+    .card, .video-wrap, .dirlist { border: 1px solid CanvasText; }
+  }
 </style>
 </head>
 <body>
 
+<a class="skip" href="#main">Skip to the main content</a>
+
 <header>
   <h1>Linkam hot stage</h1>
-  <span class="dot" id="dot" title="link state"></span>
-  <span class="badge" id="phase">connecting</span>
+  <span class="dot" id="dot" aria-hidden="true"></span>
+  <span class="badge" id="phase" role="status">connecting</span>
   <span class="badge" id="rec">recording</span>
   <span class="spacer"></span>
-  <span class="mono" id="csvpath" style="font-size:12px;color:var(--dim)"></span>
-  <a href="/api/data.csv" id="csvdl" download>download CSV</a>
+  <span class="mono dim" id="csvpath" style="font-size:0.75rem"></span>
+  <button id="b-save" type="button" class="mono" style="font-size:0.8125rem">Save to…</button>
+  <a href="/api/data.csv" id="csvdl" download>Download CSV</a>
 </header>
 
-<main>
-  <section>
+<main id="main">
+  <!-- The camera: the biggest thing on the page, top left. -->
+  <section class="camera">
     <div class="card">
-      <h2>Live temperature</h2>
-      <div class="temp">
-        <span class="value" id="temp">--</span><span class="unit">°C</span>
-      </div>
-      <div class="readouts">
-        <div class="readout"><div class="k">TC2</div><div class="v" id="tc2">--</div></div>
-        <div class="readout"><div class="k">Target</div><div class="v" id="target">--</div></div>
-        <div class="readout"><div class="k">Rate</div><div class="v" id="rate">--</div></div>
-        <div class="readout"><div class="k">Phase detail</div><div class="v small" id="detail">--</div></div>
-      </div>
-      <canvas id="spark"></canvas>
-      <p class="caption" id="sparkinfo"></p>
-      <p class="hint">The trace is the stage temperature against local time; the
-      dashed line is the programmed setpoint. TC2 is the second thermocouple
-      channel. If nothing is attached to it the reading is noise — the stage
-      temperature is the large number above.</p>
-    </div>
-
-    <div class="card" style="margin-top:16px">
       <h2>Camera</h2>
       <div class="video-wrap" id="videowrap">
-        <img id="video" alt="live camera feed">
+        <img id="video" alt="Live picture from the microscope. The time is
+             written in the lower left of the picture and the temperature in
+             the upper right.">
         <div class="waiting" id="videowait">no camera</div>
       </div>
       <div class="row" style="margin-top:12px; align-items:center">
         <label class="check" for="v-prog">
           <input type="checkbox" id="v-prog"> record the video with the programme
         </label>
-        <button id="v-now" style="flex:0 0 auto">Record now</button>
+        <button id="v-now" type="button" style="flex:0 0 auto">Record now</button>
       </div>
       <p class="hint" id="videostate"></p>
       <p class="hint">The time is written in the lower left of the picture and
-      the temperature in the upper right. They are burned into the frames, so
-      a recording carries its own numbers.</p>
+      the temperature in the upper right. They are burned into the frames, so a
+      recording carries its own numbers.</p>
     </div>
   </section>
 
-  <section>
+  <!-- The controls: a narrow column on the right. -->
+  <section class="ramp">
     <div class="card">
-      <h2>Ramp &amp; hold</h2>
+      <h2>Ramp and hold</h2>
       <div class="row">
         <div class="field"><label for="r-target">Target °C</label><input id="r-target" type="number" step="0.1" value="25"></div>
         <div class="field"><label for="r-rate">Rate °C/min</label><input id="r-rate" type="number" step="0.1" min="0.1" value="2"></div>
         <div class="field"><label for="r-hold">Hold s</label><input id="r-hold" type="number" step="1" min="0" value="60"></div>
       </div>
-      <button class="primary wide" id="b-ramp">Start ramp</button>
+      <button class="primary wide" id="b-ramp" type="button">Start ramp</button>
       <p class="hint">This moves the stage.</p>
 
       <h2 style="margin-top:22px">Programme</h2>
@@ -179,21 +316,74 @@
         <input id="p-steps" type="text" value="25:2:60,60:2:600" class="mono">
       </div>
       <div class="field"><label for="p-repeat">Repeat</label><input id="p-repeat" type="number" min="1" value="1"></div>
-      <button class="primary wide" id="b-prog">Start programme</button>
+      <button class="primary wide" id="b-prog" type="button">Start programme</button>
 
       <div class="actions" style="margin-top:18px">
-        <button class="danger" id="b-stop" style="flex:2">Stop</button>
-        <button id="b-rec" style="flex:1">Pause rec</button>
+        <button class="danger" id="b-stop" type="button" style="flex:2">Stop</button>
+        <button id="b-rec" type="button" style="flex:1">Pause rec</button>
       </div>
       <p class="hint" id="safety"></p>
     </div>
+  </section>
 
-    <div class="card" style="margin-top:16px">
+  <!-- The temperature: below the controls, on the right. -->
+  <section class="temp">
+    <div class="card">
+      <h2>Live temperature</h2>
+      <div class="temp">
+        <span class="value" id="temp">--</span><span class="unit">°C</span>
+      </div>
+      <dl class="readouts">
+        <div><dt>TC2</dt><dd id="tc2">--</dd></div>
+        <div><dt>Target</dt><dd id="target">--</dd></div>
+        <div><dt>Rate</dt><dd id="rate">--</dd></div>
+        <div><dt>Phase detail</dt><dd class="small" id="detail">--</dd></div>
+      </dl>
+      <canvas id="spark" role="img" aria-label="Graph of the stage temperature against the time"></canvas>
+      <p class="caption" id="sparkinfo"></p>
+      <p class="hint">The trace is the stage temperature against local time; the
+      dashed line is the programmed setpoint. TC2 is the second thermocouple
+      channel. If nothing is attached to it the reading is noise — the stage
+      temperature is the large number above.</p>
+    </div>
+  </section>
+
+  <section class="log">
+    <div class="card">
       <h2>Log</h2>
-      <ul id="log"></ul>
+      <ul id="log" role="log" aria-live="polite" aria-label="Events"></ul>
     </div>
   </section>
 </main>
+
+<!-- Where the experiment's data goes. -->
+<div class="modal" id="savemodal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="savetitle">
+    <h2 id="savetitle">Where should this experiment's data go?</h2>
+    <p class="hint" style="margin-top:0">The temperature record, the video and the
+    programme results are all written into one folder.</p>
+
+    <div class="field">
+      <label for="save-folder">Folder</label>
+      <div class="row">
+        <input id="save-folder" type="text" class="mono" spellcheck="false">
+        <button id="save-up" type="button" style="flex:0 0 auto">Up one level</button>
+      </div>
+    </div>
+    <div class="dirlist" id="savedirs" aria-label="Folders"></div>
+
+    <div class="field">
+      <label for="save-prefix">Name prefix (optional)</label>
+      <input id="save-prefix" type="text" placeholder="e.g. run7" spellcheck="false">
+      <p class="hint">The folder will be <span id="savename" class="mono">…</span></p>
+    </div>
+
+    <div class="actions">
+      <button id="save-cancel" type="button" style="flex:1">Cancel</button>
+      <button id="save-ok" type="button" class="primary" style="flex:2">Use this folder</button>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -201,12 +391,21 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   temperature_c: null, sensor2_c: null, target_c: null, rate_c_per_min: null,
-  trend: [], running: false, camera: null,
+  trend: [], running: false, camera: null, output_dir: null, default_name: null,
 };
 
 // The margins of the plot, in CSS pixels: they hold the axis numbers.
 const AXIS = { left: 58, right: 14, top: 18, bottom: 22 };
 const PLOT_FONT = '10px ui-monospace, "SF Mono", Menlo, Consolas, monospace';
+// The plot's colours, from the University palette: the trace is
+// Nottingham Blue on a 5% tint of it, and the setpoint is Jubilee Red.
+const PLOT = {
+  ground: "#f3f4f5",
+  grid: "#cfd4d8",
+  label: "#405162",
+  trace: "#10263b",
+  target: "#b91c2e",
+};
 // Tick spacings that land on whole minutes, so the clock reads cleanly.
 const TIME_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 180, 300, 600, 900, 1800,
                     3600, 7200, 10800, 21600, 43200, 86400];
@@ -332,6 +531,8 @@ function applyState(s) {
   if (s.csv_path !== undefined) $("csvpath").textContent = s.csv_path || "";
   if (s.running !== undefined) state.running = s.running;
   if (s.camera !== undefined) applyCamera(s.camera);
+  if (s.output_dir !== undefined) state.output_dir = s.output_dir;
+  if (s.default_name !== undefined) state.default_name = s.default_name;
   $("temp").textContent = fmt(state.temperature_c, 2);
   $("tc2").textContent = fmt(state.sensor2_c, 2);
   draw();
@@ -407,7 +608,7 @@ function draw() {
 
   const pts = state.trend.filter(p => p[1] !== null && p[1] !== undefined);
   if (pts.length < 2) {
-    g.fillStyle = "#9aa3b2"; g.font = PLOT_FONT;
+    g.fillStyle = PLOT.label; g.font = PLOT_FONT;
     g.textAlign = "center"; g.textBaseline = "middle";
     g.fillText("waiting for samples", (plot.x0 + plot.x1) / 2, (plot.y0 + plot.y1) / 2);
     $("sparkinfo").textContent = "";
@@ -432,8 +633,8 @@ function draw() {
   // The scales: a grid with the numbers on it.  How many numbers there are
   // depends on how wide the plot is, so they never run into each other.
   g.font = PLOT_FONT;
-  g.strokeStyle = "rgba(50,55,66,.6)";
-  g.fillStyle = "#9aa3b2";
+  g.strokeStyle = PLOT.grid;
+  g.fillStyle = PLOT.label;
 
   const want = Math.max(2, Math.min(6, Math.floor((plot.x1 - plot.x0) / 100)));
 
@@ -461,20 +662,20 @@ function draw() {
   // the target line
   if (hasTarget) {
     const y = Y(target);
-    g.strokeStyle = "rgba(77,163,255,.45)";
-    g.setLineDash([4, 4]); g.beginPath();
+    g.strokeStyle = PLOT.target;
+    g.setLineDash([5, 4]); g.beginPath();
     g.moveTo(plot.x0, y); g.lineTo(plot.x1, y); g.stroke();
     g.setLineDash([]);
   }
 
-  g.strokeStyle = "#4da3ff"; g.lineWidth = 2;
+  g.strokeStyle = PLOT.trace; g.lineWidth = 2;
   g.beginPath();
   pts.forEach((p, i) => { const x = X(p[0]), y = Y(p[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
   g.stroke();
 
   // the last point
   const last = pts[pts.length - 1];
-  g.fillStyle = "#4da3ff";
+  g.fillStyle = PLOT.trace;
   g.beginPath(); g.arc(X(last[0]), Y(last[1]), 3.5, 0, 6.284); g.fill();
 
   // The setpoint, written on the line it belongs to.  It goes last, so it
@@ -484,9 +685,9 @@ function draw() {
     const label = `target ${tempLabel(target, 0.1)} °C`;
     g.textAlign = "right"; g.textBaseline = "bottom";
     const width = g.measureText(label).width;
-    g.fillStyle = "#23272f";
+    g.fillStyle = PLOT.ground;
     g.fillRect(plot.x1 - 5 - width, y - 15, width + 5, 14);
-    g.fillStyle = "#4da3ff";
+    g.fillStyle = PLOT.target;
     g.fillText(label, plot.x1 - 2, y - 3);
   }
 
@@ -508,6 +709,128 @@ async function post(url, body) {
   if (!r.ok) { addLog({ phase: "error", message: data.error || r.statusText, error: true, time: Date.now()/1000 }); }
   return data;
 }
+
+/* ------------------------------------------------------------------ *
+ * Where the experiment's data goes.
+ * ------------------------------------------------------------------ */
+
+let saveReturnFocus = null;
+
+function openSave() {
+  saveReturnFocus = document.activeElement;
+  // The folder the last run used is the natural place for this one.
+  const current = state.output_dir || "results/webui";
+  const folder = current.replace(/\/[^/]*$/, "") || ".";
+  $("save-folder").value = folder;
+  $("save-prefix").value = "";
+  updateSaveName();
+  $("savemodal").hidden = false;
+  $("save-folder").focus();
+  loadDirs(folder);
+}
+
+function closeSave() {
+  $("savemodal").hidden = true;
+  if (saveReturnFocus && saveReturnFocus.focus) saveReturnFocus.focus();
+}
+
+/* The name the folder will have, with the prefix the user gave it. */
+function updateSaveName() {
+  const base = state.default_name || "experiment";
+  const prefix = $("save-prefix").value.trim();
+  const name = prefix ? `${prefix}-${base}` : base;
+  $("savename").textContent = name;
+  return name;
+}
+
+/* The folders under a path, so the user can pick one. */
+async function loadDirs(path) {
+  const list = $("savedirs");
+  list.textContent = "";
+  try {
+    const r = await fetch(`/api/dirs?path=${encodeURIComponent(path)}`);
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "cannot read that folder");
+    if (data.parent) {
+      const up = document.createElement("button");
+      up.type = "button";
+      up.className = "up";
+      up.textContent = "↑ up one level";
+      up.addEventListener("click", () => { $("save-folder").value = data.parent; loadDirs(data.parent); });
+      list.appendChild(up);
+    }
+    for (const name of data.dirs) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = name;
+      b.addEventListener("click", () => {
+        $("save-folder").value = `${data.path}/${name}`;
+        loadDirs(`${data.path}/${name}`);
+      });
+      list.appendChild(b);
+    }
+    if (!list.children.length) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.style.padding = "8px 12px";
+      p.textContent = "no folders here";
+      list.appendChild(p);
+    }
+  } catch (err) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.style.padding = "8px 12px";
+    p.textContent = String(err.message || err);
+    list.appendChild(p);
+  }
+}
+
+/* Keep the keyboard inside the pop-up while it is open. */
+function trapFocus(e) {
+  if (e.key !== "Tab") return;
+  const box = $("savemodal").querySelector(".modal-box");
+  const items = Array.from(box.querySelectorAll("button, input, [href], select, textarea"))
+    .filter(el => !el.disabled && el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
+
+$("b-save").addEventListener("click", openSave);
+$("save-cancel").addEventListener("click", closeSave);
+$("save-prefix").addEventListener("input", updateSaveName);
+$("save-up").addEventListener("click", () => {
+  const parts = $("save-folder").value.replace(/\/+$/, "").split("/");
+  if (parts.length > 1) parts.pop();
+  else parts.push("..");
+  const path = parts.join("/") || "/";
+  $("save-folder").value = path;
+  loadDirs(path);
+});
+$("save-ok").addEventListener("click", async () => {
+  const name = updateSaveName();
+  const result = await post("/api/output", {
+    folder: $("save-folder").value.trim(),
+    name,
+  });
+  if (result && result.ok) {
+    state.output_dir = result.output_dir;
+    addLog({ phase: "recording", message: `the data is now going to ${result.output_dir}`, time: Date.now() / 1000 });
+    closeSave();
+  }
+});
+$("savemodal").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeSave(); return; }
+  trapFocus(e);
+});
+$("savemodal").addEventListener("click", (e) => {
+  if (e.target === $("savemodal")) closeSave();
+});
+
+/* ------------------------------------------------------------------ *
+ * The controls.
+ * ------------------------------------------------------------------ */
 
 $("b-ramp").addEventListener("click", async () => {
   const target = parseFloat($("r-target").value);
@@ -544,6 +867,13 @@ $("v-now").addEventListener("click", async () => {
 $("video").addEventListener("error", () => {
   $("videowrap").classList.remove("live");
   $("videowait").textContent = "the camera feed stopped";
+});
+// The picture's own shape sets the frame, so the letterboxing is right.
+$("video").addEventListener("load", () => {
+  const img = $("video");
+  if (img.naturalWidth && img.naturalHeight) {
+    $("videowrap").style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+  }
 });
 
 window.addEventListener("resize", draw);

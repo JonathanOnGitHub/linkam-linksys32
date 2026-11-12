@@ -584,6 +584,12 @@ clicked on:
 # then open http://127.0.0.1:8765/
 ```
 
+**Where the data goes.**  *Save to…* in the header chooses the folder the
+temperature record, the video and the programme results are written into.
+The name defaults to the date and the time, and a prefix can be added
+to it — `run7-experiment-20261112-191503` — so a run can be found again
+afterwards.  The folders of the machine can be browsed in the pop-up.
+
 ---
 
 ## Troubleshooting quick reference

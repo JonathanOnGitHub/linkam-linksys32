@@ -290,18 +290,27 @@ the GUI — and do not run two copies of the GUI.
 
 The page shows:
 
-* the stage temperature, large, updating twice a second, with a
-  sparkline of the last few minutes — the degrees up the side and the
-  clock times along the bottom, so the trace can be read against the
-  CSV, and the setpoint written on its own dashed line;
+* the microscope's camera, live and large, in the top left, with the
+  **time in the lower left of the picture and the temperature in the
+  upper right**;
+* controls for a single ramp-and-hold, and for a multi-step programme
+  in the same `target:rate:hold` form the command line uses, in a narrow
+  column on the right;
+* the stage temperature, large, below the controls, with a sparkline of
+  the last few minutes — the degrees up the side and the clock times
+  along the bottom, so the trace can be read against the CSV, and the
+  setpoint written on its own dashed line;
 * the second thermocouple (TC2), the programmed target and rate, and
   what the programme is doing;
-* the microscope's camera, live, with the **time in the lower left of
-  the picture and the temperature in the upper right**;
-* controls for a single ramp-and-hold, and for a multi-step programme
-  in the same `target:rate:hold` form the command line uses;
 * a log of the programme's phase changes, and a link to download the
   CSV.
+
+**Where the data goes.**  *Save to…* in the header opens a pop-up that
+chooses the folder.  The name defaults to the date and the time
+(`experiment-20261112-191503`) and a prefix can be added to it
+(`run7-experiment-20261112-191503`), and the folders of the machine can
+be browsed in the pop-up.  The temperature record, the video and the
+programme results all go into that one folder.
 
 The recording starts when the server does and goes to
 `results/webui/<timestamp>/telemetry.csv`, one row per sample:
@@ -327,8 +336,42 @@ first, and there is a single always-visible **Stop** button.
 
 The page is one file of HTML with its script inline, so its script is
 checked on its own with `node tools/check_plot.js` — it runs the page's
-code against a stubbed DOM and checks the axes and the labels.  The same
-check runs with the rest of the tests, if node is installed.
+code against a stubbed DOM and checks the axes, the labels and the
+camera.  The same check runs with the rest of the tests, if node is
+installed.
+
+### How the page looks
+
+The page follows the **University of Nottingham's visual identity**:
+
+* **Nottingham Blue** (`#10263B`) carries everything: the header, the
+  body text, the plot's trace and the primary buttons.  The supporting
+  colours are accents and are used sparingly — Jubilee Red for the
+  errors and the setpoint line, Forest Green for the running badge,
+  Rebel's Gold for the holding badge, Malaysia Sky Blue for the focus
+  ring;
+* the page ground is the 40% tint of Portland Stone and the cards are
+  white on it, which is what the brand guidance asks for on screen;
+* the labels are in **sentence case**, not capitals: the guidance says
+  capitals should be avoided in large amounts, because they are not
+  particularly accessible;
+* the brand fonts are **Circular** (sans) and **Lora** (serif).  Both
+  are licensed, so the University's own system substitutes are used:
+  Arial and Georgia.  The CSS names Circular and Lora first, so they are
+  picked up if they are ever installed.
+
+Accessibility was a requirement, not an afterthought:
+
+* every colour pairing is checked against WCAG 2.2 by
+  `tools/check_contrast.py` — the body text is 15.4:1, the captions
+  8.2:1, and the badges 6.4:1 and better;
+* the structure is checked by `tools/check_page.py`: every control has
+  a name, the headings do not skip a level, the pop-up is a dialog with
+  a name, it closes on Escape and keeps the keyboard inside it, there
+  is a skip link, a visible focus ring, and the page respects a
+  reduced-motion setting and forced colours;
+* the state is never carried by colour alone — the coloured dot beside
+  the phase badge is decorative and the badge says the phase in words.
 
 #### The camera in the web GUI
 

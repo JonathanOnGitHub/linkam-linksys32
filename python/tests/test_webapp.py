@@ -11,6 +11,7 @@ import csv
 import json
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -23,9 +24,11 @@ from linkam.protocol import ProgrammerState, Telemetry
 from linkam.video import Frame
 from linkam.webapp import StageController, make_server, parse_steps
 
-#: The page, and the tool that checks its script.
+#: The page, and the tools that check it.
 PAGE = Path(__file__).parent.parent / "linkam" / "static" / "index.html"
 PLOT_CHECK = Path(__file__).parent.parent / "tools" / "check_plot.js"
+CONTRAST_CHECK = Path(__file__).parent.parent / "tools" / "check_contrast.py"
+PAGE_CHECK = Path(__file__).parent.parent / "tools" / "check_page.py"
 
 
 # --------------------------------------------------------------------------- #
@@ -440,6 +443,120 @@ def test_the_page_draws_a_plot_with_a_scale_on_both_axes():
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_page_colours_pass_the_contrast_checks():
+    """Every colour the page puts together must be readable.
+
+    The thresholds are WCAG 2.2's: 4.5:1 for text, 3:1 for the parts of a
+    user interface that carry information.
+    """
+    result = subprocess.run(
+        [sys.executable, str(CONTRAST_CHECK)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_page_is_built_for_the_keyboard_and_a_screen_reader():
+    """Every control has a name, the headings are in order, and the
+    pop-up behaves like a pop-up."""
+    result = subprocess.run(
+        [sys.executable, str(PAGE_CHECK)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Where the experiment's data goes
+# --------------------------------------------------------------------------- #
+
+
+def test_the_default_name_is_the_date_and_the_time(controller):
+    """A sensible default, which the user can give a prefix to."""
+    name = controller.default_name()
+    assert name.startswith("experiment-")
+    assert len(name) == len("experiment-20261112-191503")
+    assert controller.default_name("run7").startswith("run7-experiment-")
+
+
+def test_the_folders_are_listed(server, tmp_path):
+    """The picker needs to know what is there."""
+    folder = tmp_path / "somewhere"
+    folder.mkdir()
+    (folder / "alpha").mkdir()
+    (folder / "beta").mkdir()
+    (folder / "a-file.txt").write_text("not a folder")
+
+    status, body = get(server + f"/api/dirs?path={folder}")
+    assert status == 200
+    payload = json.loads(body.decode("utf-8"))
+    assert payload["dirs"] == ["alpha", "beta"], "only the folders"
+    assert payload["parent"] == str(folder.resolve().parent)
+
+
+def test_a_folder_that_is_not_there_is_refused(server):
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        get(server + "/api/dirs?path=/no/such/folder/at/all")
+    assert excinfo.value.code == 404
+
+
+def test_the_output_folder_can_be_changed(controller, tmp_path):
+    """The data goes where the user says."""
+    controller._programmer.emit(temperature=21.0)
+    before = controller._csv_path
+    assert before.exists()
+
+    target = tmp_path / "run7"
+    controller.set_output_dir(target)
+
+    assert controller.output_dir == target
+    assert controller._csv_path == target / "telemetry.csv"
+    assert controller._csv_path.exists(), "a new file is started there"
+    assert before.exists(), "what was recorded stays where it was"
+
+    controller._programmer.emit(temperature=22.0)
+    rows = list(csv.reader(controller._csv_path.read_text().splitlines()))
+    assert float(rows[1][2]) == pytest.approx(22.0)
+
+
+def test_the_output_folder_can_be_set_over_http(server, tmp_path):
+    status, payload = post(
+        server + "/api/output",
+        {"folder": str(tmp_path), "name": "run7-experiment-20261112-191503"},
+    )
+    assert status == 200
+    assert payload["ok"]
+    assert payload["name"] == "run7-experiment-20261112-191503"
+    assert payload["output_dir"].endswith("run7-experiment-20261112-191503")
+
+
+def test_a_name_with_a_path_in_it_is_refused(server, tmp_path):
+    """A name is a name, not a path."""
+    status, payload = post(
+        server + "/api/output", {"folder": str(tmp_path), "name": "../escape"}
+    )
+    assert status == 400
+    assert "error" in payload
+
+
+def test_the_output_folder_is_refused_while_the_video_is_recording(
+    camera_controller, tmp_path
+):
+    """Stopping the video in the middle of a programme is worse than
+    making the user wait."""
+    ctl, feed = camera_controller
+    ctl.start_video_recording()
+    try:
+        with pytest.raises(RuntimeError):
+            ctl.set_output_dir(tmp_path / "elsewhere")
+    finally:
+        ctl.stop_video_recording()
 
 
 # --------------------------------------------------------------------------- #
