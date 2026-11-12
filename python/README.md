@@ -524,6 +524,9 @@ with AravisBackend(exposure_us=5000, roi="1280x1024") as cam:
 ```bash
 # list the cameras the SDK can see
 python -c "from linkam.video import AravisBackend; print(AravisBackend.list_cameras())"
+
+# or, with the diagnostics: the USB link, the udev rule, and what to do
+python tools/check_camera.py
 ```
 
 **What it needs.**  Aravis itself, and the GObject-introspection

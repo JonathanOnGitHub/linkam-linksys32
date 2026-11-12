@@ -135,15 +135,12 @@ Two things it needs:
 Check it before a long run:
 
 ```bash
-.venv/bin/python -c "
-import gi; gi.require_version('Aravis', '0.8')
-from gi.repository import Aravis
-Aravis.update_device_list(); print(Aravis.get_n_devices(), 'camera(s)')"
+.venv/bin/python tools/check_camera.py
 ```
 
-`0 camera(s)` means the camera is not seen: check the cable, the port
-(it must be SuperSpeed -- over USB 2.0 the control interface works
-while the stream does not), and the udev rule.
+It says what the Aravis stack sees, how fast the USB link is, and
+whether the udev rule is installed — and it finds Aravis the same way
+the GUI does, so if it works there the GUI will work too.
 
 ### If you have an older RS-232 programmer
 
