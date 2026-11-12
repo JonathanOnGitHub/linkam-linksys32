@@ -55,16 +55,19 @@
 
   header {
     display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-    padding: 10px 18px; background: var(--navy); color: var(--white);
+    padding: 10px 18px; background: var(--navy-80); color: var(--white);
     border-bottom: 4px solid var(--gold);
   }
+  /* Nottingham Blue itself (#10263b) is very dark and reads as black
+     across a whole bar, so the bar is the brand's own 80% tint of it --
+     still the University's colour, and unmistakably blue. */
   h1 { font-size: 1.0625rem; margin: 0; font-weight: 700; }
   header a { color: var(--white); }
   header button {
     background: transparent; color: var(--white);
-    border-color: var(--navy-40); padding: 6px 12px;
+    border-color: var(--navy-20); padding: 6px 12px;
   }
-  header button:hover:not(:disabled) { background: var(--navy-80); }
+  header button:hover:not(:disabled) { background: var(--navy); }
   .spacer { flex: 1; }
   .mono { font-family: var(--mono); }
   .dim { color: var(--navy-80); }
@@ -165,17 +168,27 @@
   /* -- the forms ------------------------------------------------------ */
   label {
     display: block; font-size: 0.8125rem; color: var(--navy-80);
-    font-weight: 700; margin-bottom: 5px;
+    font-weight: 700; margin-bottom: 4px;
   }
-  .field { margin-bottom: 12px; }
+  .field { margin-bottom: 10px; }
+  .card h3 { font-size: 0.875rem; margin: 16px 0 8px; }
   input, select, textarea {
-    width: 100%; padding: 9px 10px; background: var(--white); color: var(--navy);
+    width: 100%; padding: 8px 9px; background: var(--white); color: var(--navy);
     border: 1px solid var(--navy-60); border-radius: 7px;
     font-family: var(--mono); font-size: 0.9375rem;
   }
   textarea { resize: vertical; min-height: 58px; }
   .row { display: flex; gap: 10px; }
   .row > * { flex: 1; }
+  /* The three numbers of a ramp, side by side, and the repeat beside
+     the steps -- so the form is as short as it can be. */
+  .fields3 {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 8px; margin-bottom: 10px;
+  }
+  .fields3 label { font-size: 0.6875rem; }
+  .fields3 input { padding: 7px 8px; font-size: 0.875rem; }
+  .row .repeat { flex: 0 0 72px; }
 
   button {
     padding: 10px 14px; border-radius: 7px; border: 1px solid var(--navy-60);
@@ -186,6 +199,8 @@
   button:disabled { opacity: .55; cursor: not-allowed; }
   button.primary { background: var(--navy); border-color: var(--navy); color: var(--white); font-weight: 700; }
   button.primary:hover:not(:disabled) { background: var(--navy-80); }
+  button.secondary { background: var(--white); border-color: var(--navy); color: var(--navy); font-weight: 700; }
+  button.secondary:hover:not(:disabled) { background: var(--navy-5); }
   button.danger { background: var(--red); border-color: var(--red); color: var(--white); font-weight: 700; }
   button.danger:hover:not(:disabled) { background: #a51828; }
   button.wide { width: 100%; }
@@ -298,31 +313,30 @@
     </div>
   </section>
 
-  <!-- The controls: a narrow column on the right. -->
+  <!-- The controls: one card, in a narrow column on the right. -->
   <section class="ramp">
     <div class="card">
-      <h2>Ramp and hold</h2>
-      <div class="row">
-        <div class="field"><label for="r-target">Target °C</label><input id="r-target" type="number" step="0.1" value="25"></div>
-        <div class="field"><label for="r-rate">Rate °C/min</label><input id="r-rate" type="number" step="0.1" min="0.1" value="2"></div>
-        <div class="field"><label for="r-hold">Hold s</label><input id="r-hold" type="number" step="1" min="0" value="60"></div>
+      <h2>Ramp, hold and programme</h2>
+
+      <div class="fields3">
+        <div><label for="r-target">Target °C</label><input id="r-target" type="number" step="0.1" value="25"></div>
+        <div><label for="r-rate">Rate °C/min</label><input id="r-rate" type="number" step="0.1" min="0.1" value="2"></div>
+        <div><label for="r-hold">Hold s</label><input id="r-hold" type="number" step="1" min="0" value="60"></div>
       </div>
       <button class="primary wide" id="b-ramp" type="button">Start ramp</button>
       <p class="hint">This moves the stage.</p>
 
-      <h2 style="margin-top:22px">Programme</h2>
-      <div class="field">
-        <label for="p-steps">Steps — target:rate:hold, comma separated</label>
-        <input id="p-steps" type="text" value="25:2:60,60:2:600" class="mono">
+      <h3>Programme</h3>
+      <div class="row">
+        <div class="field"><label for="p-steps">Steps — target:rate:hold</label><input id="p-steps" type="text" value="25:2:60,60:2:600" class="mono"></div>
+        <div class="field repeat"><label for="p-repeat">Repeat</label><input id="p-repeat" type="number" min="1" value="1"></div>
       </div>
-      <div class="field"><label for="p-repeat">Repeat</label><input id="p-repeat" type="number" min="1" value="1"></div>
-      <button class="primary wide" id="b-prog" type="button">Start programme</button>
+      <button class="secondary wide" id="b-prog" type="button">Start programme</button>
 
-      <div class="actions" style="margin-top:18px">
+      <div class="actions" style="margin-top:14px">
         <button class="danger" id="b-stop" type="button" style="flex:2">Stop</button>
         <button id="b-rec" type="button" style="flex:1">Pause rec</button>
       </div>
-      <p class="hint" id="safety"></p>
     </div>
   </section>
 

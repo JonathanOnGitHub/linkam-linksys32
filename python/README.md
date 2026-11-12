@@ -293,11 +293,11 @@ The page shows:
 * the microscope's camera, live and large, in the top left, with the
   **time in the lower left of the picture and the temperature in the
   upper right**;
-* controls for a single ramp-and-hold, and for a multi-step programme
-  in the same `target:rate:hold` form the command line uses, in a narrow
-  column on the right;
-* the stage temperature, large, below the controls, with a sparkline of
-  the last few minutes — the degrees up the side and the clock times
+* one card on the right for the ramp, the hold and the programme: the
+  three numbers of a ramp side by side, the steps and the repeat
+  together, and the controls under them;
+* the stage temperature, large, below that, with a sparkline of the
+  last few minutes — the degrees up the side and the clock times
   along the bottom, so the trace can be read against the CSV, and the
   setpoint written on its own dashed line;
 * the second thermocouple (TC2), the programmed target and rate, and
@@ -344,12 +344,14 @@ installed.
 
 The page follows the **University of Nottingham's visual identity**:
 
-* **Nottingham Blue** (`#10263B`) carries everything: the header, the
-  body text, the plot's trace and the primary buttons.  The supporting
-  colours are accents and are used sparingly — Jubilee Red for the
-  errors and the setpoint line, Forest Green for the running badge,
-  Rebel's Gold for the holding badge, Malaysia Sky Blue for the focus
-  ring;
+* **Nottingham Blue** (`#10263B`) carries the text, the buttons, the
+  plot's trace and the rules.  The header bar is the brand's own 80%
+  tint of it (`#405162`): Nottingham Blue itself is very dark and reads
+  as black across a whole bar, while the tint is unmistakably blue.  The
+  supporting colours are accents and are used sparingly — Jubilee Red
+  for the errors and the setpoint line, Forest Green for the running
+  badge, Rebel's Gold for the holding badge and the rule under the
+  header, Malaysia Sky Blue for the focus ring;
 * the page ground is the 40% tint of Portland Stone and the cards are
   white on it, which is what the brand guidance asks for on screen;
 * the labels are in **sentence case**, not capitals: the guidance says
