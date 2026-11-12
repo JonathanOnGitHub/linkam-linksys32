@@ -283,7 +283,9 @@ the GUI — and do not run two copies of the GUI.
 The page shows:
 
 * the stage temperature, large, updating twice a second, with a
-  sparkline of the last few minutes;
+  sparkline of the last few minutes — the degrees up the side and the
+  clock times along the bottom, so the trace can be read against the
+  CSV, and the setpoint written on its own dashed line;
 * the second thermocouple (TC2), the programmed target and rate, and
   what the programme is doing;
 * controls for a single ramp-and-hold, and for a multi-step programme
@@ -312,6 +314,11 @@ Two things it does **not** do, because it cannot:
 
 Starting a ramp moves the stage, so the browser asks for confirmation
 first, and there is a single always-visible **Stop** button.
+
+The page is one file of HTML with its script inline, so its script is
+checked on its own with `node tools/check_plot.js` — it runs the page's
+code against a stubbed DOM and checks the axes and the labels.  The same
+check runs with the rest of the tests, if node is installed.
 
 ### As a library
 

@@ -9,15 +9,22 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
+import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
 from linkam.protocol import ProgrammerState, Telemetry
 from linkam.webapp import StageController, make_server, parse_steps
+
+#: The page, and the tool that checks its script.
+PAGE = Path(__file__).parent.parent / "linkam" / "static" / "index.html"
+PLOT_CHECK = Path(__file__).parent.parent / "tools" / "check_plot.js"
 
 
 # --------------------------------------------------------------------------- #
@@ -409,3 +416,27 @@ def test_the_event_stream_opens_and_reports_the_state(server):
     assert line.startswith("data: ")
     payload = json.loads(line[len("data: "):])
     assert payload["type"] == "state"
+
+
+# --------------------------------------------------------------------------- #
+# The page's own script
+# --------------------------------------------------------------------------- #
+
+
+def test_the_page_draws_a_plot_with_a_scale_on_both_axes():
+    """The plot must carry numbers: degrees on one axis, times on the other.
+
+    The page is one file of HTML with its script inline, so the script is
+    run against a stubbed DOM by ``tools/check_plot.js``.  Without node the
+    check is skipped -- the browser is the real test of this.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    result = subprocess.run(
+        [node, str(PLOT_CHECK), str(PAGE)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
