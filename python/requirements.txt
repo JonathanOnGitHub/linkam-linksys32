@@ -1,4 +1,8 @@
 pyserial>=3.5
 numpy>=1.21
 opencv-python>=4.5 ; sys_platform != "darwin"
+# The numbers burned into the video frames are drawn with a real font,
+# which is what Pillow is for.  Without it the frames fall back to
+# OpenCV's own lettering.
+Pillow>=9.0
 pytest>=7.0

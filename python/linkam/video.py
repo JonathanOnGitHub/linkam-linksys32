@@ -1033,6 +1033,196 @@ def annotate(image, *, temperature_c=None, target_c=None, when=None):
     if image is None:
         return image
 
+    if when is None:
+        when = time.time()
+
+    try:
+        from PIL import Image, ImageDraw, ImageFilter, ImageFont
+    except ImportError:
+        # No Pillow: OpenCV's own lettering, which is heavier but works.
+        return _annotate_with_opencv(image, temperature_c, target_c, when)
+
+    import numpy as np
+    from datetime import datetime
+
+    h, w = image.shape[:2]
+    margin = max(10, round(h * 0.022))
+    shadow = max(1, round(h * 0.005))
+
+    sans = _load_font(_SANS_FONTS, max(12, round(h * 0.042)))
+    mono = _load_font(_MONO_FONTS, max(10, round(h * 0.034)))
+    small = _load_font(_SANS_FONTS, max(9, round(h * 0.028)))
+
+    # -- the time, lower left ---------------------------------------------- #
+    stamp = datetime.fromtimestamp(when).strftime("%H:%M:%S")
+    _draw_text(image, stamp, mono, margin, h - margin, "left", "bottom")
+
+    # -- the temperature, upper right --------------------------------------- #
+    if temperature_c is not None:
+        text = f"{temperature_c:.2f} °C"
+        _draw_text(image, text, sans, w - margin, margin, "right", "top")
+
+        # -- the setpoint, under the temperature ---------------------------- #
+        if target_c is not None:
+            _draw_text(
+                image,
+                f"target {target_c:.1f} °C",
+                small,
+                w - margin,
+                margin + round(h * 0.058),
+                "right",
+                "top",
+            )
+
+    return image
+
+
+# --------------------------------------------------------------------------- #
+# The letters on the frames
+# --------------------------------------------------------------------------- #
+
+#: Where the fonts are looked for, in the order they are preferred.  The
+#: page uses Circular (the University's sans) and falls back to Arial;
+#: on a Linux machine that is Liberation Sans, which is Arial's
+#: metric-compatible twin.  The clock is in a monospace face, like the
+#: numbers on the page.
+_FONT_DIRS = (
+    "/usr/share/fonts/truetype/liberation",
+    "/usr/share/fonts/truetype/dejavu",
+    "/usr/share/fonts/truetype/noto",
+    "/usr/share/fonts/TTF",
+    "/usr/share/fonts/truetype",
+    "/Library/Fonts",
+    "/System/Library/Fonts",
+    "C:\\Windows\\Fonts",
+)
+
+_SANS_FONTS = (
+    "Circular",
+    "Arial",
+    "LiberationSans-Regular",
+    "DejaVuSans",
+    "NotoSans-Regular",
+)
+
+_MONO_FONTS = (
+    "Menlo",
+    "Consolas",
+    "SFMono",
+    "LiberationMono-Regular",
+    "DejaVuSansMono",
+    "NotoSansMono-Regular",
+)
+
+#: The fonts that have been found, so the disk is not searched every frame.
+_font_cache: dict = {}
+
+
+def _load_font(candidates, size: int):
+    """The first of `candidates` that is on the machine, at `size`.
+
+    ``None`` is returned when there is none, and the caller falls back
+    to OpenCV's own lettering.
+    """
+    import os
+
+    key = (tuple(candidates), size)
+    if key in _font_cache:
+        return _font_cache[key]
+
+    from PIL import ImageFont
+
+    font = None
+    for directory in _FONT_DIRS:
+        if not os.path.isdir(directory):
+            continue
+        for name in candidates:
+            for extension in (".ttf", ".otf", ".TTF", ".OTF"):
+                path = os.path.join(directory, name + extension)
+                if os.path.isfile(path):
+                    try:
+                        font = ImageFont.truetype(path, size)
+                    except OSError:  # pragma: no cover - a broken font
+                        continue
+                    break
+            if font is not None:
+                break
+        if font is not None:
+            break
+
+    _font_cache[key] = font
+    return font
+
+
+def _draw_text(image, text, font, x, y, align="left", valign="top", colour=(255, 255, 255)):
+    """Draw `text` onto the frame, with a soft shadow under it.
+
+    The shadow is a blurred copy of the text rather than a hard outline,
+    which is what makes it look like lettering rather than a stencil.
+    """
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFilter
+
+    if font is None:
+        return
+
+    h, w = image.shape[:2]
+    shadow = max(1, round(h * 0.005))
+    bbox = font.getbbox(text)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    if tw <= 0 or th <= 0:
+        return
+
+    pad = shadow * 3
+    size = (tw + pad * 2, th + pad * 2)
+
+    # The text's own origin, so the glyphs sit where they should.
+    ox, oy = pad - bbox[0], pad - bbox[1]
+
+    soft = Image.new("RGBA", size, (0, 0, 0, 0))
+    ImageDraw.Draw(soft).text(
+        (ox + shadow, oy + shadow), text, font=font, fill=(0, 0, 0, 150)
+    )
+    soft = soft.filter(ImageFilter.GaussianBlur(shadow * 0.9))
+
+    crisp = Image.new("RGBA", size, (0, 0, 0, 0))
+    ImageDraw.Draw(crisp).text((ox, oy), text, font=font, fill=colour + (255,))
+
+    layer = Image.alpha_composite(soft, crisp)
+
+    # Where the text goes.
+    left = x - tw if align == "right" else x
+    top = y if valign == "top" else y - th
+    x0 = left - pad
+    y0 = top - pad
+
+    # Only the block the text covers is touched.
+    cx0 = max(0, x0)
+    cy0 = max(0, y0)
+    cx1 = min(w, x0 + layer.width)
+    cy1 = min(h, y0 + layer.height)
+    if cx1 <= cx0 or cy1 <= cy0:
+        return
+    crop = layer.crop(
+        (cx0 - x0, cy0 - y0, cx0 - x0 + (cx1 - cx0), cy0 - y0 + (cy1 - cy0))
+    )
+
+    arr = np.array(crop).astype(np.float32)
+    alpha = arr[:, :, 3:4] / 255.0
+    bgr = arr[:, :, :3][:, :, ::-1]
+    region = image[cy0:cy1, cx0:cx1].astype(np.float32)
+    image[cy0:cy1, cx0:cx1] = np.clip(
+        region * (1.0 - alpha) + bgr * alpha, 0, 255
+    ).astype(np.uint8)
+
+
+def _annotate_with_opencv(image, temperature_c, target_c, when):
+    """The overlay, drawn with OpenCV's own lettering.
+
+    This is the fallback for a machine without Pillow.  OpenCV has no
+    TrueType support, so the letters are Hershey ones and the degree
+    sign has to be drawn as a ring.
+    """
     import cv2
     from datetime import datetime
 
@@ -1050,20 +1240,13 @@ def annotate(image, *, temperature_c=None, target_c=None, when=None):
         cv2.putText(image, text, origin, font, size, black, thickness + 2)
         cv2.putText(image, text, origin, font, size, colour, thickness)
 
-    if when is None:
-        when = time.time()
-
-    # -- the time, lower left --------------------------------------------- #
     stamp = datetime.fromtimestamp(when).strftime("%H:%M:%S")
     (tw, th), _ = cv2.getTextSize(stamp, font, scale, thickness)
     put(stamp, (margin, h - margin))
 
-    # -- the temperature, upper right --------------------------------------- #
     if temperature_c is not None:
         text = f"{temperature_c:.2f}"
         (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
-        # The degree sign is a small ring: Hershey fonts have no glyph
-        # for it, so it is drawn rather than typed.
         radius = max(2, int(round(th * 0.32)))
         gap = max(2, int(round(th * 0.18)))
         ring_w = 2 * radius + gap
@@ -1079,7 +1262,6 @@ def annotate(image, *, temperature_c=None, target_c=None, when=None):
         cv2.circle(image, (ring_x, ring_y), radius, white, thickness)
         put("C", (x + tw + ring_w, y))
 
-        # -- the setpoint, under the temperature ---------------------------- #
         if target_c is not None:
             small_scale = scale * 0.7
             small = f"target {target_c:.1f} C"

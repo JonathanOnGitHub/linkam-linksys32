@@ -360,7 +360,9 @@ The page follows the **University of Nottingham's visual identity**:
 * the brand fonts are **Circular** (sans) and **Lora** (serif).  Both
   are licensed, so the University's own system substitutes are used:
   Arial and Georgia.  The CSS names Circular and Lora first, so they are
-  picked up if they are ever installed.
+  picked up if they are ever installed.  The numbers written onto the
+  video frames use the same stack, so the video and the page look like
+  one thing;
 
 Accessibility was a requirement, not an afterthought:
 
@@ -406,6 +408,12 @@ left of the picture and the temperature in the upper right, drawn onto
 the frame before it is sent to the browser *and* before it is written
 to the recording.  A recorded file therefore carries its own numbers:
 any frame of it can be read on its own, later, without a sidecar.
+
+The letters are drawn with a real font — the same stack the page uses,
+so the video and the page look like one thing — and with a soft shadow
+under them rather than a hard outline, so they read against any image.
+Pillow draws them; on a machine without it the frames fall back to
+OpenCV's own lettering.
 
 The camera is **best-effort**: the temperature link is the important
 one, and a camera that will not open, or that stops mid-programme, does
