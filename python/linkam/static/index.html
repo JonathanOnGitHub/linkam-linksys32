@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linkam hot stage</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1c1f25;
+    --panel2: #23272f;
+    --line: #323742;
+    --text: #e6e8ec;
+    --dim: #9aa3b2;
+    --accent: #4da3ff;
+    --good: #46c07a;
+    --warn: #e8b93b;
+    --bad: #e2553f;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 10px 18px; background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); display: inline-block; }
+  .dot.on { background: var(--good); }
+  .badge {
+    padding: 3px 9px; border-radius: 999px; background: var(--panel2);
+    border: 1px solid var(--line); font-size: 12px; color: var(--dim);
+  }
+  .badge.ramping { color: #0d1117; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .badge.holding  { color: #0d1117; background: var(--warn); border-color: var(--warn); font-weight: 600; }
+  .badge.error, .badge.stopped { color: #fff; background: var(--bad); border-color: var(--bad); font-weight: 600; }
+  .spacer { flex: 1; }
+  .mono { font-family: var(--mono); }
+
+  main { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(320px,1fr); gap: 16px; padding: 16px; align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 12px; font-weight: 600; }
+
+  .temp { display: flex; align-items: baseline; gap: 10px; }
+  .temp .value { font-family: var(--mono); font-size: 64px; font-weight: 600; line-height: 1; letter-spacing: -.02em; }
+  .temp .unit { color: var(--dim); font-size: 20px; }
+  .readouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 10px 18px; margin-top: 18px; }
+  .readout .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+  .readout .v { font-family: var(--mono); font-size: 17px; margin-top: 2px; }
+  .readout .v.small { font-size: 14px; color: var(--dim); }
+  canvas { width: 100%; height: 150px; display: block; margin-top: 16px; background: var(--panel2); border-radius: 8px; }
+
+  label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin-bottom: 5px; }
+  .field { margin-bottom: 12px; }
+  input, select, textarea {
+    width: 100%; padding: 9px 10px; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; font-family: var(--mono); font-size: 14px;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 58px; }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+
+  button {
+    padding: 10px 14px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--panel2); color: var(--text); font-size: 14px; font-weight: 500;
+    cursor: pointer; font-family: inherit;
+  }
+  button:hover:not(:disabled) { border-color: #4a5160; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 600; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
+  button.wide { width: 100%; }
+  .actions { display: flex; gap: 10px; margin-top: 4px; }
+  .hint { font-size: 12px; color: var(--dim); margin-top: 8px; }
+  .hint.warn { color: var(--warn); }
+
+  #log { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; font-family: var(--mono); font-size: 12.5px; }
+  #log li { padding: 4px 0; border-bottom: 1px solid rgba(50,55,66,.5); display: flex; gap: 10px; }
+  #log .t { color: var(--dim); flex: 0 0 78px; }
+  #log .p { color: var(--accent); flex: 0 0 92px; }
+  #log li.error .p { color: var(--bad); }
+  #log li.stopped .p { color: var(--bad); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Linkam hot stage</h1>
+  <span class="dot" id="dot" title="link state"></span>
+  <span class="badge" id="phase">connecting</span>
+  <span class="badge" id="rec">recording</span>
+  <span class="spacer"></span>
+  <span class="mono" id="csvpath" style="font-size:12px;color:var(--dim)"></span>
+  <a href="/api/data.csv" id="csvdl" download>download CSV</a>
+</header>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>Live temperature</h2>
+      <div class="temp">
+        <span class="value" id="temp">--</span><span class="unit">°C</span>
+      </div>
+      <div class="readouts">
+        <div class="readout"><div class="k">TC2</div><div class="v" id="tc2">--</div></div>
+        <div class="readout"><div class="k">Target</div><div class="v" id="target">--</div></div>
+        <div class="readout"><div class="k">Rate</div><div class="v" id="rate">--</div></div>
+        <div class="readout"><div class="k">Phase detail</div><div class="v small" id="detail">--</div></div>
+      </div>
+      <canvas id="spark"></canvas>
+      <p class="hint">TC2 is the second thermocouple channel. If nothing is
+      attached to it the reading is noise — the stage temperature is the
+      large number above.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>Ramp &amp; hold</h2>
+      <div class="row">
+        <div class="field"><label for="r-target">Target °C</label><input id="r-target" type="number" step="0.1" value="25"></div>
+        <div class="field"><label for="r-rate">Rate °C/min</label><input id="r-rate" type="number" step="0.1" min="0.1" value="2"></div>
+        <div class="field"><label for="r-hold">Hold s</label><input id="r-hold" type="number" step="1" min="0" value="60"></div>
+      </div>
+      <button class="primary wide" id="b-ramp">Start ramp</button>
+      <p class="hint">This moves the stage.</p>
+
+      <h2 style="margin-top:22px">Programme</h2>
+      <div class="field">
+        <label for="p-steps">Steps — target:rate:hold, comma separated</label>
+        <input id="p-steps" type="text" value="25:2:60,60:2:600" class="mono">
+      </div>
+      <div class="field"><label for="p-repeat">Repeat</label><input id="p-repeat" type="number" min="1" value="1"></div>
+      <button class="primary wide" id="b-prog">Start programme</button>
+
+      <div class="actions" style="margin-top:18px">
+        <button class="danger" id="b-stop" style="flex:2">Stop</button>
+        <button id="b-rec" style="flex:1">Pause rec</button>
+      </div>
+      <p class="hint" id="safety"></p>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Log</h2>
+      <ul id="log"></ul>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const state = { temperature_c: null, sensor2_c: null, trend: [], running: false };
+
+function fmt(v, digits) {
+  return (v === null || v === undefined || Number.isNaN(v)) ? "--" : Number(v).toFixed(digits);
+}
+
+function setPhase(phase) {
+  const el = $("phase");
+  el.textContent = phase || "idle";
+  el.className = "badge " + (phase || "");
+}
+
+function addLog(ev) {
+  const li = document.createElement("li");
+  if (ev.error) li.className = "error";
+  if (ev.phase === "stopped") li.className = "stopped";
+  const t = new Date((ev.time || Date.now() / 1000) * 1000)
+    .toLocaleTimeString("en-GB", { hour12: false });
+  li.innerHTML = '<span class="t"></span><span class="p"></span><span class="m"></span>';
+  li.children[0].textContent = t;
+  li.children[1].textContent = ev.phase || "";
+  li.children[2].textContent = ev.message || "";
+  const log = $("log");
+  log.prepend(li);
+  while (log.children.length > 200) log.removeChild(log.lastChild);
+}
+
+function applyState(s) {
+  if (s.temperature_c !== undefined) state.temperature_c = s.temperature_c;
+  if (s.sensor2_c !== undefined) state.sensor2_c = s.sensor2_c;
+  if (s.trend) state.trend = s.trend;
+  if (s.phase !== undefined) setPhase(s.phase);
+  if (s.phase_detail !== undefined) $("detail").textContent = s.phase_detail || "--";
+  if (s.programmed_rate_c_per_min !== undefined)
+    $("rate").textContent = s.programmed_rate_c_per_min === null ? "--"
+      : s.programmed_rate_c_per_min + " °C/min";
+  if (s.programmed_setpoint_c !== undefined)
+    $("target").textContent = s.programmed_setpoint_c === null ? "--"
+      : s.programmed_setpoint_c + " °C";
+  if (s.connected !== undefined) $("dot").className = "dot" + (s.connected ? " on" : "");
+  if (s.recording !== undefined) {
+    $("rec").textContent = s.recording ? "recording" : "paused";
+    $("b-rec").textContent = s.recording ? "Pause rec" : "Resume rec";
+  }
+  if (s.csv_path !== undefined) $("csvpath").textContent = s.csv_path || "";
+  if (s.running !== undefined) state.running = s.running;
+  $("temp").textContent = fmt(state.temperature_c, 2);
+  $("tc2").textContent = fmt(state.sensor2_c, 2);
+  draw();
+}
+
+function draw() {
+  const c = $("spark");
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== w * dpr || c.height !== h * dpr) {
+    c.width = w * dpr; c.height = h * dpr;
+  }
+  const g = c.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const pts = state.trend.filter(p => p[1] !== null && p[1] !== undefined);
+  if (pts.length < 2) return;
+
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  const target = Number($("target").textContent);
+  if (!Number.isNaN(target) && $("target").textContent !== "--") {
+    lo = Math.min(lo, target); hi = Math.max(hi, target);
+  }
+  if (hi - lo < 1) { hi += 0.5; lo -= 0.5; }
+  const pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
+
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+  const X = (t) => ((t - t0) / (t1 - t0 || 1)) * (w - 4) + 2;
+  const Y = (v) => h - 3 - ((v - lo) / (hi - lo)) * (h - 6);
+
+  // the target line
+  if (!Number.isNaN(target) && $("target").textContent !== "--") {
+    g.strokeStyle = "rgba(77,163,255,.45)";
+    g.setLineDash([4, 4]); g.beginPath();
+    g.moveTo(0, Y(target)); g.lineTo(w, Y(target)); g.stroke();
+    g.setLineDash([]);
+  }
+
+  g.strokeStyle = "#4da3ff"; g.lineWidth = 2;
+  g.beginPath();
+  pts.forEach((p, i) => { const x = X(p[0]), y = Y(p[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.stroke();
+
+  // the last point
+  const last = pts[pts.length - 1];
+  g.fillStyle = "#4da3ff";
+  g.beginPath(); g.arc(X(last[0]), Y(last[1]), 3.5, 0, 6.284); g.fill();
+}
+
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { addLog({ phase: "error", message: data.error || r.statusText, error: true, time: Date.now()/1000 }); }
+  return data;
+}
+
+$("b-ramp").addEventListener("click", async () => {
+  const target = parseFloat($("r-target").value);
+  const rate = parseFloat($("r-rate").value);
+  const hold = parseFloat($("r-hold").value);
+  if (!Number.isFinite(target)) return;
+  if (!confirm(
+    `Ramp to ${target} °C at ${rate} °C/min` + (hold ? `, then hold ${hold} s` : "") +
+    ".\n\nThis moves the stage."
+  )) return;
+  await post("/api/ramp", { target_c: target, rate_c_per_min: rate, hold_s: hold });
+});
+
+$("b-prog").addEventListener("click", async () => {
+  const steps = $("p-steps").value;
+  const repeat = parseInt($("p-repeat").value || "1", 10);
+  if (!confirm(`Run the programme:\n\n${steps}\n\nrepeated ${repeat} time(s).\n\nThis moves the stage.`)) return;
+  await post("/api/programme", { steps, repeat });
+});
+
+$("b-stop").addEventListener("click", () => post("/api/stop"));
+$("b-rec").addEventListener("click", async () => {
+  const on = $("rec").textContent !== "recording";
+  await post("/api/recording", { recording: on });
+});
+
+window.addEventListener("resize", draw);
+
+const es = new EventSource("/api/stream");
+es.onmessage = (m) => {
+  const ev = JSON.parse(m.data);
+  if (ev.type === "telemetry") {
+    state.temperature_c = ev.temperature_c;
+    state.sensor2_c = ev.sensor2_c;
+    if (ev.time && ev.temperature_c !== null) state.trend.push([ev.time, ev.temperature_c]);
+    if (state.trend.length > 600) state.trend.shift();
+    $("temp").textContent = fmt(ev.temperature_c, 2);
+    $("tc2").textContent = fmt(ev.sensor2_c, 2);
+    if (ev.phase !== undefined) setPhase(ev.phase);
+    if (ev.phase_detail !== undefined) $("detail").textContent = ev.phase_detail || "--";
+    if (ev.programmed_rate_c_per_min !== undefined)
+      $("rate").textContent = ev.programmed_rate_c_per_min === null ? "--" : ev.programmed_rate_c_per_min + " °C/min";
+    if (ev.programmed_setpoint_c !== undefined)
+      $("target").textContent = ev.programmed_setpoint_c === null ? "--" : ev.programmed_setpoint_c + " °C";
+    draw();
+  } else if (ev.type === "event") {
+    addLog(ev);
+  } else if (ev.type === "state") {
+    applyState(ev);
+  }
+};
+es.onerror = () => { $("dot").className = "dot"; };
+</script>
+</body>
+</html>
