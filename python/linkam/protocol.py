@@ -961,6 +961,10 @@ class HidProgrammer(LinkamProgrammer):
         self.output_report_id = output_report_id
         self.vendor = vendor
         self.product = product
+        # The T95 does not report the programmed rate or setpoint, so
+        # they are remembered from the commands that were sent.
+        self._programmed_rate: float | None = None
+        self._programmed_setpoint: float | None = None
 
     def _make_transport(self) -> Transport:
         from .hid import HidTransport
@@ -1020,6 +1024,27 @@ class HidProgrammer(LinkamProgrammer):
     #: How often to poll the T95 for status.
     POLL_PERIOD_S = 0.5
 
+    @property
+    def programmed_rate(self) -> float | None:
+        """The ramp rate last sent to the instrument, in C/min.
+
+        The T95 does not report the programmed rate -- the status
+        payload has no field that changes when a rate is programmed -- so
+        the value is remembered from the commands that were sent.  It is
+        what the instrument was told, which is what the stall detection
+        and the settle detection need.
+        """
+        return self._programmed_rate
+
+    @property
+    def programmed_setpoint(self) -> float | None:
+        """The setpoint last sent to the instrument, in C.
+
+        As with :attr:`programmed_rate`, the instrument does not report
+        this back, so it is remembered from what was sent.
+        """
+        return self._programmed_setpoint
+
     def _write_blocks(self, frames) -> None:
         """Write raw protocol blocks to the transport."""
         transport = self._transport
@@ -1050,49 +1075,55 @@ class HidProgrammer(LinkamProgrammer):
                 "the transport does not support the T95's binary protocol"
             )
 
-        self._write_blocks(build_status_poll())
+        # The whole exchange is serialised.  The background reader thread
+        # polls too, and the reply blocks of the two polls are
+        # indistinguishable, so an unsynchronised foreground poll would
+        # steal the background thread's blocks and vice versa -- which
+        # showed up as polls that got no answer at all.
+        with self._lock:
+            self._write_blocks(build_status_poll())
 
-        # The reply is several blocks and a USB transfer can drop one --
-        # seen on real hardware at roughly one poll in a hundred.  The
-        # reply is self-describing: block index 1 starts it and every
-        # block states the total count.  So the blocks are collected
-        # into a run that starts at an index-1 block, and any blocks
-        # seen before that are leftovers from an earlier reply and are
-        # discarded.
-        #
-        # Taking the first three reports instead would be worse in two
-        # ways: a missing block 1 shifts the command stream, so the
-        # reply decodes as "no command, no payload" and the temperature
-        # silently disappears; and a leftover block from the previous
-        # reply would be mixed into this one.
-        deadline = time.monotonic() + (
-            timeout if timeout is not None else self.timeout
-        )
-        run: list[bytes] = []
-        count = 0
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            chunk = reader(1, remaining)
-            if not chunk:
-                break
-            for block in chunk:
-                index = block[0] if block else 0
-                if index == 1:
-                    # A new reply starts here.
-                    run = [block]
-                    count = block[1] or 1
-                    continue
-                if not run:
-                    # A leftover block from an earlier reply.
-                    continue
-                run.append(block)
-                if len(run) >= count:
-                    reply = assemble_reply(run)
-                    if reply is not None and reply.is_status:
-                        return status_from_reply(reply)
-                    run = []
+            # The reply is several blocks and a USB transfer can drop one
+            # -- seen on real hardware at roughly one poll in a hundred.
+            # The reply is self-describing: block index 1 starts it and
+            # every block states the total count.  So the blocks are
+            # collected into a run that starts at an index-1 block, and
+            # any blocks seen before that are leftovers from an earlier
+            # reply and are discarded.
+            #
+            # Taking the first three reports instead would be worse in
+            # two ways: a missing block 1 shifts the command stream, so
+            # the reply decodes as "no command, no payload" and the
+            # temperature silently disappears; and a leftover block from
+            # the previous reply would be mixed into this one.
+            deadline = time.monotonic() + (
+                timeout if timeout is not None else self.timeout
+            )
+            run: list[bytes] = []
+            count = 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                chunk = reader(1, remaining)
+                if not chunk:
+                    break
+                for block in chunk:
+                    index = block[0] if block else 0
+                    if index == 1:
+                        # A new reply starts here.
+                        run = [block]
+                        count = block[1] or 1
+                        continue
+                    if not run:
+                        # A leftover block from an earlier reply.
+                        continue
+                    run.append(block)
+                    if len(run) >= count:
+                        reply = assemble_reply(run)
+                        if reply is not None and reply.is_status:
+                            return status_from_reply(reply)
+                        run = []
 
         if run:
             raise ProtocolError(
@@ -1113,19 +1144,44 @@ class HidProgrammer(LinkamProgrammer):
         field is then zero.  A zero is not a temperature, so the poll is
         repeated rather than reporting "no temperature".
 
+        A poll can also fail *transiently*, without saying anything
+        about the instrument's health: a USB transfer can drop one
+        block of the reply, and the controller can leave stale blocks
+        queued from an earlier poll.  Both make the poll fail while
+        the instrument is perfectly healthy, so they are retried on the
+        same terms as a missing temperature.  Otherwise a single
+        dropped block aborts the whole read, which is not something
+        the caller can do anything about.
+
         Raises :class:`ProtocolError` if the instrument does not answer,
         or keeps answering without a temperature.
         """
+        attempts = max(1, retries)
         last_error = "the T95 answered but reported no temperature"
-        for _ in range(max(1, retries)):
-            status = self.poll_status(timeout)
-            if status.temperature_c is not None:
-                return status
-            last_error = (
-                "the T95 answered but reported no temperature; "
-                f"blocks={[b[:12].hex() for b in status.blocks]}"
-            )
-            time.sleep(0.3)
+        for attempt in range(attempts):
+            try:
+                status = self.poll_status(timeout)
+            except ProtocolError as exc:
+                # The poll failed in a way that may be transient: an
+                # incomplete reply, or no answer at all.  Remember why
+                # and try again -- the last error is reported if every
+                # attempt fails.
+                last_error = str(exc)
+                log.debug(
+                    "status poll failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    attempts,
+                    exc,
+                )
+            else:
+                if status.temperature_c is not None:
+                    return status
+                last_error = (
+                    "the T95 answered but reported no temperature; "
+                    f"blocks={[b[:12].hex() for b in status.blocks]}"
+                )
+            if attempt + 1 < attempts:
+                time.sleep(0.3)
         raise ProtocolError(last_error)
 
     def read_temperature(self, timeout: float | None = None, retries: int = 3) -> float:
@@ -1152,6 +1208,7 @@ class HidProgrammer(LinkamProgrammer):
         from .t95 import build_rate_command
 
         self._write_blocks(build_rate_command(rate))
+        self._programmed_rate = rate
 
     def set_limit(self, limit: float) -> None:
         """Set the temperature setpoint in degrees Celsius.
@@ -1163,6 +1220,7 @@ class HidProgrammer(LinkamProgrammer):
         from .t95 import build_setpoint_command
 
         self._write_blocks(build_setpoint_command(limit))
+        self._programmed_setpoint = limit
 
     def programme_ramp(
         self,
@@ -1192,6 +1250,8 @@ class HidProgrammer(LinkamProgrammer):
             ]
         )
         self._write_blocks(build_command_frames(Cmd.SETMULT, payload))
+        self._programmed_rate = rate
+        self._programmed_setpoint = limit
 
     def start(self, rate: float | None = None, setpoint: float | None = None) -> None:
         """Start the ramp.
@@ -1215,6 +1275,10 @@ class HidProgrammer(LinkamProgrammer):
             entries = [(Cmd.MULTI_START, 0.0)]
         payload = build_multi_command(entries)
         self._write_blocks(build_command_frames(Cmd.SETMULT, payload))
+        if rate is not None:
+            self._programmed_rate = rate
+        if setpoint is not None:
+            self._programmed_setpoint = setpoint
 
     def stop(self) -> None:
         """Stop the ramp (``eCMDT95_SETSTOP``)."""
@@ -1273,11 +1337,21 @@ class HidProgrammer(LinkamProgrammer):
         if status.sensor2_c is not None:
             tlm.values["temperature2"] = status.sensor2_c
             tlm.units["temperature2"] = "°C"
-        if status.rate is not None:
-            tlm.values["rate"] = status.rate
+        # The rate and the limit are the values this host programmed.
+        #
+        # They are *not* read out of the status payload: the T95 does
+        # not report them, and the two float fields the SDK calls
+        # HEATER_RATE and HEATER_SETPOINT are constants (0.70 and 0.35)
+        # that do not change when a rate or a setpoint is programmed.
+        # Reporting those constants as the instrument's rate would make
+        # the stall detection think the stage is always creeping, and
+        # would make the settle detection never decide the temperature
+        # had stopped moving.
+        if self._programmed_rate is not None:
+            tlm.values["rate"] = self._programmed_rate
             tlm.units["rate"] = "°C/min"
-        if status.setpoint_c is not None:
-            tlm.values["limit"] = status.setpoint_c
+        if self._programmed_setpoint is not None:
+            tlm.values["limit"] = self._programmed_setpoint
             tlm.units["limit"] = "°C"
 
         self._absorb(tlm)

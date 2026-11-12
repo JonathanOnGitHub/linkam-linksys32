@@ -603,20 +603,96 @@ answer's payload is 136 bytes:
 
 | payload offset | type | meaning |
 |---|---|---|
-| 0 | float32 | `HEATER1_TEMP` — the stage temperature, °C |
-| 4 | float32 | the second thermocouple channel |
-| 8 | float32 | `HEATER_RATE` — the programmed rate, °C/min |
-| 12 | float32 | `HEATER_SETPOINT` — the programmed setpoint, °C |
+| 0 | float32 | the stage temperature, °C |
+| 4 | float32 | an unconnected/floating input (see below) |
+| 8 | float32 | unknown — constant at 0.70 on the controller tested |
+| 12 | float32 | unknown — constant at 0.35 on the controller tested |
+| 72, 76, 80 | float32 | live values that change during a programme |
+| 84 | int32 | seconds elapsed in the current stage of the programme |
+| 96 | int32 | a programme/state counter |
 
-Those offsets are the SDK's own: `StandardStage::parseReply` copies the
-payload to `stage + 0x80`, and `TemperatureControlledStage::getValue`
-reads `stage + 0x80` for `HEATER1_TEMP`, `stage + 0x88` for
-`HEATER_RATE` and `stage + 0x8c` for `HEATER_SETPOINT`.
+**Only offset 0 is the stage temperature**, and it is the only one that
+has been confirmed against the hardware: a ramp programmed at 2 °C/min
+to a 30 °C setpoint moved the offset-0 value at exactly 2.00 °C/min and
+stopped it at exactly 30.00 °C.
 
-**This is exactly what the empirical notes in §5.6 of the previous
-revision observed**: the temperature at block offset 10, the rate at 18
-and the limit at 22 — the payload offsets plus the 10 bytes of reply
-header.  And the captured answer decodes byte for byte:
+#### 5.6.6 The rate and the setpoint are *not* in the payload
+
+The previous revision of this document claimed that offsets 8 and 12 were
+the programmed rate and the programmed setpoint, on the authority of the
+SDK.  **That was a misreading of the SDK, and the hardware disproves
+it.**
+
+What the SDK actually does, read out of `libLinkamSDK.so`:
+
+* `TemperatureControlledStage::getValue` (0x2c2f76) handles exactly two
+  temperature values: `eStageValueTypeHeater1Temp`, which it returns
+  from `mInfo.temp`, and `eStageValueTypeHeater2Temp`, which it returns
+  from `mInfo.secTemp`.  It handles **no** rate and **no** setpoint.
+* `Stage::getValue` (0x2c0ac0) is where those live, and it returns
+  `eStageValueTypeHeaterRate` from `this->mRate` and
+  `eStageValueTypeHeaterSetpoint` from `this->mLimit`.
+* `Stage::setValue` (0x2c0b44) is what writes them: it stores the
+  value in `this->mRate` / `this->mLimit` and *then* sends the
+  instrument `0x382` / `0x383` in a `0x301` MultiCommand of length
+  `0x60`.
+
+So `mRate` and `mLimit` are **host-side members of the `Stage` class**
+(`mRate` at offset 228, `mLimit` at offset 232) — the values this
+process last programmed.  The SDK never reads them back from the
+controller, because the controller does not report them.
+
+The earlier note quoted "reads `stage + 0x88` for `HEATER_RATE` and
+`stage + 0x8c` for `HEATER_SETPOINT`".  Those were the *`Stage` class
+member* offsets, mistaken for offsets into the payload — the two are
+four bytes apart in both cases, which is what made the mistake so easy
+to make.
+
+The hardware agrees.  With a 2 °C/min rate and a 30 °C setpoint
+programmed, and the whole 136-byte payload sampled throughout the ramp:
+
+* offsets 8 and 12 never changed — they stayed at exactly 0.70 and
+  0.35, which are the values an idle controller reports and the values
+  the SDK's own defaults happen to hold;
+* no field anywhere in the payload ever held 2.0 or 30.0.
+
+So the instrument's status poll simply does not report the programme.
+The code now exposes those two offsets as `field8` / `field12`, and
+`HidProgrammer` remembers the rate and setpoint it sent
+(`programmed_rate` / `programmed_setpoint`) — which is what the SDK
+does with `mRate` / `mLimit`, and what the stall detection needs.
+
+#### 5.6.7 The second thermocouple
+
+`StandardStageInfo` — the struct the payload is copied into — is 192
+bytes and reads:
+
+| offset | member |
+|---|---|
+| 0 | `temp` |
+| 4 | `blueSig` |
+| 8 | `greenSig` |
+| 12 | `pinkSig` |
+| 16 | `secTemp` |
+| 20 | `thirdTemp` |
+| 24 | `spare` |
+| 64 | `running` |
+| 104 | `rhUnit` |
+| 156 | `wpUnit` |
+
+So in the SDK's struct the *second* thermocouple is at offset **16**,
+and offset 4 is a trigger signal.  On the controller tested, offset 16
+reads 0.0 throughout while offset 4 wanders over tens of degrees — so
+the T95's firmware does **not** lay its payload out like
+`StandardStageInfo`, and what sits at offset 4 is not the
+`StandardStageInfo` `blueSig` either.
+
+What offset 4 is, is still unknown (see §5.8).  It behaves like a
+floating input: it wandered between about −40 °C and +4 °C over
+twenty minutes with nothing attached to it, and it did not track the
+stage during a ramp.
+
+#### 5.6.8 The captured answer
 
 ```
 01 03 | 00 03 | 88 00 | 00 00 | 00 00 | 3c 80 bb 41 | 36 2e 36 c2 | 33 33 33 3f | 33 33 3b 33
@@ -666,15 +742,30 @@ programme specifically for updating it (§5.9).
 4. ~~The application-level encoding inside the 63-byte report.~~  It is
    **binary** (§5.5).
 5. ~~**The command frames.**~~  **SOLVED** — §5.6.
+6. ~~**Whether the controller's firmware is new enough for this
+   framing.**~~  **Yes** — the status poll answers, and the
+   `eCMDT95_SETMULT` programme commands work: a 2 °C/min ramp to a
+   30 °C setpoint was executed by the instrument and held there
+   exactly (§5.6.6).
+7. ~~**What the rate and the setpoint fields are.**~~  They are not
+   the programme — §5.6.6.  The instrument does not report its
+   programme, and the SDK never asks it for one.
 
 **Still open:**
 
-1. Whether the particular controller in hand runs firmware new enough
-   for this framing.  If the status poll does not answer, update the
-   firmware with Linkam's bootloader programme (§5.9) and try again.
-2. What the second thermocouple channel (payload offset 4) is wired to.
+1. What payload offset 4 actually is.  It is not the second
+   thermocouple in the SDK's struct (§5.6.7), and it behaves like a
+   floating input with nothing attached.
+2. What the live fields at offsets 72, 76 and 80 are, and what the
+   int32 at offset 84 counts.
 3. The exact meaning of the `eCMDT9X_*` command family (`0x04c0`
    and up), which the SDK uses for controller and slot information.
+   This is where the cable's limits come from: `Stage::setValue`
+   checks the rate and the setpoint against
+   `ctrlInfo.cable.maxRate` / `minLimit` / `maxLimit` before sending
+   them.  **This package does not do that check**, so an out-of-range
+   setpoint is accepted by the host and may be rejected — or not — by
+   the instrument.
 
 ### 5.9 The T95 has a bootloader mode, and Linkam publishes the updater
 

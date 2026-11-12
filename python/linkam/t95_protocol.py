@@ -99,18 +99,57 @@ answer's payload is 136 bytes, laid out as::
     ------  -------  --------------------------------------------------
     0       float32  HEATER1_TEMP      -- the stage temperature, in C
     4       float32  second thermocouple channel
-    8       float32  HEATER_RATE       -- the programmed rate, in C/min
-    12      float32  HEATER_SETPOINT   -- the programmed setpoint, in C
+    8       float32  constant, 0.70 on the controller tested
+    12      float32  constant, 0.35 on the controller tested
+    72      float32  varies slowly
+    76      float32  varies slowly
+    80      float32  varies slowly
 
-Those offsets are the SDK's own: ``StandardStage::parseReply`` copies the
-payload to ``stage + 0x80`` and ``TemperatureControlledStage::getValue``
-reads ``stage + 0x80`` for ``HEATER1_TEMP``, ``stage + 0x88`` for
-``HEATER_RATE`` and ``stage + 0x8c`` for ``HEATER_SETPOINT``.
+The SDK calls offsets 8 and 12 ``HEATER_RATE`` and ``HEATER_SETPOINT``,
+but **on real hardware they are not the programmed rate and setpoint**.
+Setting a 2 C/min rate and a 30 C setpoint and then sampling the whole
+payload throughout the ramp found no field that carried either value:
+offsets 8 and 12 stayed at exactly 0.70 and 0.35, and no field
+anywhere in the payload ever held 30 or 2.
+
+So the programmed rate and setpoint are **not reported** by the status
+poll at all.  What the offsets 8 and 12 are is still unknown; they are
+exposed as :attr:`T95Status.field8` and :attr:`T95Status.field12`
+rather than under the SDK's names, so that nothing downstream mistakes
+a constant for the instrument's rate.
+
+The SDK's own layout, for the record, is *not* a layout of this
+payload.  Read out of ``libLinkamSDK.so``:
+
+* ``TemperatureControlledStage::getValue`` (0x2c2f76) returns
+  ``eStageValueTypeHeater1Temp`` from ``mInfo.temp`` and
+  ``eStageValueTypeHeater2Temp`` from ``mInfo.secTemp``.  It handles
+  no rate and no setpoint.
+* ``Stage::getValue`` (0x2c0ac0) returns ``eStageValueTypeHeaterRate``
+  from ``this->mRate`` and ``eStageValueTypeHeaterSetpoint`` from
+  ``this->mLimit`` -- and ``Stage::setValue`` (0x2c0b44) is what
+  writes them, before sending the instrument ``0x382`` / ``0x383`` in a
+  ``0x301`` MultiCommand of length ``0x60``.
+
+``mRate`` and ``mLimit`` are therefore **host-side members of the
+``Stage`` class** (offsets 228 and 232): the values this process last
+programmed, which the SDK keeps because the controller never reports
+them back.  An earlier revision of this file mistook those class
+member offsets for offsets into this payload.
+
+The struct the payload is copied into, ``StandardStageInfo``, is 192
+bytes: ``temp`` at 0, ``blueSig`` 4, ``greenSig`` 8, ``pinkSig`` 12,
+``secTemp`` 16, ``thirdTemp`` 20, ``spare`` 24, ``running`` 64,
+``rhUnit`` 104, ``wpUnit`` 156.  The controller tested does not lay its
+payload out that way: offset 16 reads 0.0 throughout, and offset 4
+wanders like a floating input, so what sits at offset 4 is not the
+``StandardStageInfo`` ``blueSig`` either.
 
 This layout is what the earlier, purely empirical notes in
 ``PROTOCOL_NOTES.md`` §5.6 observed in the raw blocks (temperature at
 block offset 10, rate at 18, limit at 22) -- the block offsets are the
-payload offsets plus the 10 bytes of reply header.
+payload offsets plus the 10 bytes of reply header.  The *temperature*
+at offset 0 checks out; the other two do not.
 
 Safety
 ------
@@ -531,11 +570,17 @@ class T95Status:
     #: noise when nothing is connected to it.
     sensor2_c: float | None = None
 
-    #: The programmed ramp rate in C/min (payload offset 8).
-    rate: float | None = None
+    #: Payload offset 8.  The SDK calls this ``HEATER_RATE``, but on real
+    #: hardware it is a **constant** (0.70 on the controller tested) that
+    #: does not change when a rate is programmed, so it is not the
+    #: instrument's rate.  What it is, is unknown.
+    field8: float | None = None
 
-    #: The programmed setpoint in C (payload offset 12).
-    setpoint_c: float | None = None
+    #: Payload offset 12.  The SDK calls this ``HEATER_SETPOINT``, but on
+    #: real hardware it is a **constant** (0.35 on the controller tested)
+    #: that does not change when a setpoint is programmed, so it is not
+    #: the instrument's setpoint.  What it is, is unknown.
+    field12: float | None = None
 
     #: The raw blocks, for forensics.
     blocks: list[bytes] = field(default_factory=list)
@@ -559,6 +604,6 @@ def status_from_reply(reply: T95Reply) -> T95Status:
     status = T95Status(blocks=list(reply.blocks))
     status.temperature_c = _f32(reply.payload, 0)
     status.sensor2_c = _f32(reply.payload, 4)
-    status.rate = _f32(reply.payload, 8)
-    status.setpoint_c = _f32(reply.payload, 12)
+    status.field8 = _f32(reply.payload, 8)
+    status.field12 = _f32(reply.payload, 12)
     return status

@@ -241,8 +241,8 @@ def test_parses_the_second_sensor():
 def test_parses_rate_and_setpoint():
     blocks = [make_block(1, rate=0.7, setpoint=0.35), make_block(2), make_block(3)]
     status = parse_status(blocks)
-    assert status.rate == pytest.approx(0.7, abs=1e-6)
-    assert status.setpoint_c == pytest.approx(0.35, abs=1e-6)
+    assert status.field8 == pytest.approx(0.7, abs=1e-6)
+    assert status.field12 == pytest.approx(0.35, abs=1e-6)
 
 
 def test_blocks_are_identified_by_index_not_position():
@@ -257,7 +257,7 @@ def test_missing_fields_are_none_not_zero():
     blocks = [make_block(1, temperature=None), make_block(2), make_block(3)]
     status = parse_status(blocks)
     assert status.temperature_c is None
-    assert status.rate is None
+    assert status.field8 is None
 
 
 def test_short_blocks_are_tolerated():
@@ -312,8 +312,8 @@ def test_parses_a_captured_answer():
     assert len(block1) == T95_REPORT_SIZE
     assert status.temperature_c == pytest.approx(23.4376, abs=1e-4)
     assert status.sensor2_c == pytest.approx(-45.5451, abs=1e-4)
-    assert status.rate == pytest.approx(0.70, abs=1e-6)
-    assert status.setpoint_c == pytest.approx(0.35, abs=1e-6)
+    assert status.field8 == pytest.approx(0.70, abs=1e-6)
+    assert status.field12 == pytest.approx(0.35, abs=1e-6)
     assert status.block_types == [1, 2, 3]
 
 

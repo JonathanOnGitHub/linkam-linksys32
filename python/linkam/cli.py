@@ -43,8 +43,8 @@ def _make_programmer(args):
     if getattr(args, "hid", False):
         return HidProgrammer(
             args.hid_node or None,
-            framing=args.hid_framing,
-            report_size=args.hid_report_size,
+            framing=getattr(args, "hid_framing", "text_padded"),
+            report_size=getattr(args, "hid_report_size", None),
             timeout=args.timeout,
         )
     return LinkamProgrammer(args.port, args.baud, strict_framing=False)
@@ -154,18 +154,23 @@ def _read(args) -> int:
                 "t": _time.time(),
                 "temperature_c": temp,
                 "sensor2_c": status.sensor2_c,
-                "rate": status.rate,
-                "limit": status.setpoint_c,
+                # The T95 does not report the programmed rate or
+                # setpoint, so these are the values this host last
+                # programmed -- which is what was asked for.
+                "rate": getattr(prog, "programmed_rate", None),
+                "limit": getattr(prog, "programmed_setpoint", None),
                 "block_types": status.block_types,
             }
             readings.append(reading)
             if not args.json:
                 shown = f"{temp:.4f} C" if temp is not None else "no temperature reported"
                 extra = []
-                if status.rate is not None:
-                    extra.append(f"rate={status.rate:g}")
-                if status.setpoint_c is not None:
-                    extra.append(f"limit={status.setpoint_c:g}")
+                rate = getattr(prog, "programmed_rate", None)
+                limit = getattr(prog, "programmed_setpoint", None)
+                if rate is not None:
+                    extra.append(f"rate={rate:g}")
+                if limit is not None:
+                    extra.append(f"limit={limit:g}")
                 suffix = ("  " + "  ".join(extra)) if extra else ""
                 print(f"  {shown}{suffix}")
             if i + 1 < count:
@@ -453,6 +458,12 @@ def main(argv=None) -> int:
     st.add_argument("--hid-node", default=None,
                     help="explicit hidraw node, e.g. /dev/hidraw1")
     st.add_argument("--baud", type=int, default=9600)
+    st.add_argument("--hid-framing", default="text_padded",
+                    choices=["raw", "id_text", "text_padded", "length_prefixed"],
+                    help="HID report framing to use")
+    st.add_argument("--hid-report-size", type=int, default=None,
+                    help="output report size in bytes (default: the protocol's "
+                         "own 64)")
     st.add_argument("--target", type=float, required=True, help="target °C")
     st.add_argument("--rate", type=float, default=None,
                     help="ramp rate in °C/min (default: leave the "
@@ -469,6 +480,12 @@ def main(argv=None) -> int:
     pr.add_argument("--hid-node", default=None,
                     help="explicit hidraw node, e.g. /dev/hidraw1")
     pr.add_argument("--baud", type=int, default=9600)
+    pr.add_argument("--hid-framing", default="text_padded",
+                    choices=["raw", "id_text", "text_padded", "length_prefixed"],
+                    help="HID report framing to use")
+    pr.add_argument("--hid-report-size", type=int, default=None,
+                    help="output report size in bytes (default: the protocol's "
+                         "own 64)")
     pr.add_argument("--steps", default=None,
                     help="steps as target:rate:hold triples, comma separated, "
                          "e.g. '25:5:60,60:2:600'")

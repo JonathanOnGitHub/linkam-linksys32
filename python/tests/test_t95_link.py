@@ -74,6 +74,41 @@ def make_programmer(blocks):
     return prog
 
 
+class ScriptedBinaryTransport(FakeBinaryTransport):
+    """A transport that serves one scripted reply per poll.
+
+    Each entry in `rounds` is the list of reports that one status poll
+    produces.  A new round starts when a poll is written, so a round can
+    be deliberately truncated -- a dropped block -- without spilling
+    into the next one.
+    """
+
+    def __init__(self, rounds):
+        super().__init__([])
+        self.rounds = [list(r) for r in rounds]
+        self.round = -1
+        self.served = 0
+
+    def write_blocks(self, frames):
+        super().write_blocks(frames)
+        self.round = min(self.round + 1, len(self.rounds) - 1)
+        self.served = 0
+
+    def read_reports(self, count, timeout=1.0):
+        if self.round < 0 or self.round >= len(self.rounds):
+            return []
+        current = self.rounds[self.round]
+        out = current[self.served : self.served + count]
+        self.served += len(out)
+        return out
+
+
+def make_scripted_programmer(rounds):
+    prog = HidProgrammer("/dev/hidraw1")
+    prog._transport = ScriptedBinaryTransport(rounds)
+    return prog
+
+
 # --------------------------------------------------------------------------- #
 # the poll
 # --------------------------------------------------------------------------- #
@@ -101,6 +136,61 @@ def test_poll_status_parses_the_answer():
     status = prog.poll_status()
     assert status.temperature_c == pytest.approx(23.6406, abs=1e-4)
     assert status.block_types == [1, 2, 3]
+
+
+# --------------------------------------------------------------------------- #
+# the programmed rate and setpoint
+# --------------------------------------------------------------------------- #
+
+
+def test_the_programmed_rate_and_setpoint_are_remembered():
+    """The T95 does not report them, so they are remembered from what was sent.
+
+    This matters: the status payload's two constant float fields (the
+    ones the SDK calls HEATER_RATE and HEATER_SETPOINT) are not the
+    instrument's rate and setpoint, so reporting them would make the
+    stall detection think the stage was always creeping and the settle
+    detection never decide the temperature had stopped moving.
+    """
+    prog = make_programmer([
+        make_block_for_test(1, temperature=23.6406),
+        make_block_for_test(2),
+        make_block_for_test(3),
+    ])
+    assert prog.programmed_rate is None
+    assert prog.programmed_setpoint is None
+
+    prog.start(rate=2.0, setpoint=30.0)
+    assert prog.programmed_rate == 2.0
+    assert prog.programmed_setpoint == 30.0
+
+
+def test_set_rate_and_set_limit_are_remembered():
+    prog = make_programmer([
+        make_block_for_test(1, temperature=23.6406),
+        make_block_for_test(2),
+        make_block_for_test(3),
+    ])
+    prog.set_rate(5.0)
+    prog.set_limit(40.0)
+    assert prog.programmed_rate == 5.0
+    assert prog.programmed_setpoint == 40.0
+
+
+def test_the_telemetry_reports_the_programmed_values_not_the_constants():
+    """The status constants must not leak into the telemetry."""
+    prog = make_programmer([
+        make_block_for_test(1, temperature=23.6406, rate=0.7, setpoint=0.35),
+        make_block_for_test(2),
+        make_block_for_test(3),
+    ])
+    prog.start(rate=2.0, setpoint=30.0)
+    seen = []
+    prog.on_telemetry(seen.append)
+    prog._read_loop_once()
+    assert seen, "the callback should have been invoked"
+    assert seen[0].values["rate"] == 2.0
+    assert seen[0].values["limit"] == 30.0
 
 
 def test_read_temperature_returns_the_value():
@@ -156,6 +246,76 @@ def test_read_status_gives_up_after_the_retry_limit():
     with pytest.raises(ProtocolError):
         prog.read_status(retries=2)
     assert len(prog._transport.written) == 2
+
+
+def test_read_status_retries_when_the_reply_is_incomplete():
+    """A dropped block must not abort the read.
+
+    A USB transfer can drop one block of the reply.  If the reply
+    starts but never completes, the poll fails -- but the instrument is
+    healthy, so the poll has to be repeated rather than abandoning the
+    read.  Seen on real hardware: a poll that answered with the block
+    indices ``[1, 2]`` and no block 3.
+    """
+    prog = make_scripted_programmer([
+        # The first reply is truncated: block 3 never arrives.
+        [make_block_for_test(1), make_block_for_test(2)],
+        # The second reply is complete.
+        [
+            make_block_for_test(1, temperature=23.5),
+            make_block_for_test(2),
+            make_block_for_test(3),
+        ],
+    ])
+    status = prog.read_status()
+    assert status.temperature_c == pytest.approx(23.5, abs=1e-4)
+    assert len(prog._transport.written) == 2, "it should have polled twice"
+
+
+def test_read_status_gives_up_when_every_reply_is_incomplete():
+    """Retrying must not be unbounded: it still gives up."""
+    prog = make_scripted_programmer([
+        [make_block_for_test(1), make_block_for_test(2)],
+        [make_block_for_test(1), make_block_for_test(2)],
+        [make_block_for_test(1), make_block_for_test(2)],
+    ])
+    with pytest.raises(ProtocolError) as excinfo:
+        prog.read_status(retries=2)
+    assert "incomplete" in str(excinfo.value)
+    assert len(prog._transport.written) == 2
+
+
+def test_read_status_gives_up_when_the_instrument_never_answers():
+    """A silent instrument is reported as such, after the retries."""
+    prog = make_programmer([])
+    with pytest.raises(ProtocolError) as excinfo:
+        prog.read_status(retries=2)
+    assert "did not answer" in str(excinfo.value)
+    assert len(prog._transport.written) == 2
+
+
+def test_a_reply_missing_its_first_block_is_not_misassembled():
+    """A leftover block must not be mistaken for the start of a reply.
+
+    The reply's blocks are placed by index, so a reply that arrives
+    without its block 1 cannot be assembled at all.  Decoding it anyway
+    would shift the command stream and silently report no temperature,
+    so the poll must wait for a complete reply instead.
+    """
+    prog = make_scripted_programmer([
+        # A leftover block from an earlier reply: no block 1, so this
+        # cannot be the start of a reply.
+        [make_block_for_test(2)],
+        # The real reply.
+        [
+            make_block_for_test(1, temperature=23.5),
+            make_block_for_test(2),
+            make_block_for_test(3),
+        ],
+    ])
+    status = prog.read_status()
+    assert status.temperature_c == pytest.approx(23.5, abs=1e-4)
+    assert len(prog._transport.written) == 2, "it should have polled twice"
 
 
 # --------------------------------------------------------------------------- #

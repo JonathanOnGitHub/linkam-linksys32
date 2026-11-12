@@ -201,8 +201,13 @@ python tools/t95_hid_probe.py --descriptor-only
 >
 > * A **status poll** is one command, `eCMDT95_GETLINK` (`0x0300`),
 >   written as a single 64-byte HID block.  The device answers with
->   three 63-byte blocks carrying the temperature, the second
->   thermocouple, the rate and the setpoint as little-endian float32.
+>   three 63-byte blocks carrying the stage temperature as a
+>   little-endian float32 at payload offset 0.
+> * **The instrument does not report its programme.**  The status
+>   payload has no field that changes when a rate or a setpoint is
+>   programmed — Linkam's own SDK keeps those values host-side for the
+>   same reason, and so does this package
+>   (`HidProgrammer.programmed_rate` / `programmed_setpoint`).
 > * **Setting the temperature** is one command, `eCMDT95_SETMULT`
 >   (`0x0301`), carrying a 96-byte `MultiCommand` payload:
 >   `cmd[0]=0x0382` (rate), `cmd[1]=0x0383` (setpoint),
