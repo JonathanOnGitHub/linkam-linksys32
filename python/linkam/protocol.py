@@ -1038,7 +1038,8 @@ class HidProgrammer(LinkamProgrammer):
 
         This is a read-only command: the instrument cannot act on it.
         """
-        from .t95 import build_status_poll, parse_status
+        from .t95 import build_status_poll
+        from .t95_protocol import assemble_reply, status_from_reply
 
         transport = self._transport
         if transport is None:
@@ -1050,14 +1051,59 @@ class HidProgrammer(LinkamProgrammer):
             )
 
         self._write_blocks(build_status_poll())
-        blocks = reader(3, timeout if timeout is not None else self.timeout)
-        if not blocks:
+
+        # The reply is several blocks and a USB transfer can drop one --
+        # seen on real hardware at roughly one poll in a hundred.  The
+        # reply is self-describing: block index 1 starts it and every
+        # block states the total count.  So the blocks are collected
+        # into a run that starts at an index-1 block, and any blocks
+        # seen before that are leftovers from an earlier reply and are
+        # discarded.
+        #
+        # Taking the first three reports instead would be worse in two
+        # ways: a missing block 1 shifts the command stream, so the
+        # reply decodes as "no command, no payload" and the temperature
+        # silently disappears; and a leftover block from the previous
+        # reply would be mixed into this one.
+        deadline = time.monotonic() + (
+            timeout if timeout is not None else self.timeout
+        )
+        run: list[bytes] = []
+        count = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            chunk = reader(1, remaining)
+            if not chunk:
+                break
+            for block in chunk:
+                index = block[0] if block else 0
+                if index == 1:
+                    # A new reply starts here.
+                    run = [block]
+                    count = block[1] or 1
+                    continue
+                if not run:
+                    # A leftover block from an earlier reply.
+                    continue
+                run.append(block)
+                if len(run) >= count:
+                    reply = assemble_reply(run)
+                    if reply is not None and reply.is_status:
+                        return status_from_reply(reply)
+                    run = []
+
+        if run:
             raise ProtocolError(
-                "the T95 did not answer the status poll; it may still be "
-                "warming up after power-on (it answers about a minute after "
-                "it is plugged in)"
+                "the T95 answered but the reply was incomplete; "
+                f"block indices={[b[0] for b in run if b]}"
             )
-        return parse_status(blocks)
+        raise ProtocolError(
+            "the T95 did not answer the status poll; it may still be "
+            "warming up after power-on (it answers about a minute after "
+            "it is plugged in)"
+        )
 
     def read_status(self, timeout: float | None = None, retries: int = 3) -> T95Status:
         """Poll for status, retrying until a temperature is present.
@@ -1204,8 +1250,6 @@ class HidProgrammer(LinkamProgrammer):
 
         Split out from :meth:`_read_loop` so it can be tested directly.
         """
-        from .t95 import build_status_poll, parse_status
-
         transport = self._transport
         if transport is None:
             return False
@@ -1214,12 +1258,14 @@ class HidProgrammer(LinkamProgrammer):
         if reader is None:
             return False
 
-        self._write_blocks(build_status_poll())
-        blocks = reader(3, self.timeout)
-        if not blocks:
+        try:
+            # poll_status() does the poll *and* waits for a complete
+            # reply, so the background loop inherits the same care
+            # about a dropped block that the one-shot read has.
+            status = self.poll_status(self.timeout)
+        except (ProtocolError, ConnectionError_):
             return False
 
-        status = parse_status(blocks)
         tlm = Telemetry(raw="T95 binary status")
         if status.temperature_c is not None:
             tlm.values["temperature"] = status.temperature_c

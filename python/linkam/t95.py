@@ -69,6 +69,7 @@ from .t95_protocol import (
     MultiCommand,
     T95Reply,
     T95Status,
+    assemble_reply,
     build_command_frames,
     build_multi_command,
     build_rate_command,
@@ -78,6 +79,7 @@ from .t95_protocol import (
     build_stop_heating_command,
     parse_reply,
     parse_status,
+    status_from_reply,
 )
 
 __all__ = [
@@ -92,6 +94,7 @@ __all__ = [
     "T95_STATUS_BLOCKS",
     "T95Reply",
     "T95Status",
+    "assemble_reply",
     "build_command_frames",
     "build_multi_command",
     "build_rate_command",
@@ -101,6 +104,7 @@ __all__ = [
     "build_stop_heating_command",
     "parse_reply",
     "parse_status",
+    "status_from_reply",
 ]
 
 #: Payload size of every T95 HID report, from the report descriptor

@@ -21,6 +21,7 @@ from linkam.t95 import (
     Cmd,
     MultiCommand,
     T95Status,
+    assemble_reply,
     build_command_frames,
     build_multi_command,
     build_rate_command,
@@ -326,3 +327,82 @@ def test_the_captured_answer_carries_the_getlink_command():
 
 def test_the_answer_has_three_blocks():
     assert T95_STATUS_BLOCKS == 3
+
+
+# --------------------------------------------------------------------------- #
+# assembling a reply from blocks that may be missing or out of order
+# --------------------------------------------------------------------------- #
+
+
+def make_realistic_blocks(count: int = 3, temperature: float = 23.6406) -> list[bytes]:
+    """The blocks the instrument really sends.
+
+    Only block 1 carries the command header and the payload; blocks 2
+    and 3 are zero-filled.  This matters for the desynchronisation
+    tests: a reply that has lost block 1 must not be able to produce a
+    temperature out of block 2's zeros.
+    """
+    blocks = []
+    for index in range(1, count + 1):
+        block = bytearray(REPLY_SIZE)
+        block[0] = index
+        block[1] = count
+        if index == 1:
+            struct.pack_into("<HHHH", block, 2, Cmd.GETLINK, 136, 0, 0)
+            struct.pack_into("<f", block, 10, temperature)
+        blocks.append(bytes(block))
+    return blocks
+
+
+def test_assemble_reply_needs_every_block():
+    """A reply is only complete when blocks 1..count are all present."""
+    blocks = [make_block(1), make_block(2), make_block(3)]
+    assert assemble_reply(blocks) is not None
+
+
+def test_assemble_reply_rejects_a_reply_missing_its_first_block():
+    """The failure seen on real hardware.
+
+    A poll occasionally answered with the block indices 2, 3, 2 -- block
+    1 had gone missing.  Sorting by index and concatenating the slices
+    then reads the command header out of block 2, which is all zeros, so
+    the reply decodes as "no command, no payload" and the temperature
+    silently disappears.
+    """
+    blocks = [make_block(2), make_block(3), make_block(2)]
+    assert assemble_reply(blocks) is None
+
+
+def test_assemble_reply_rejects_a_reply_missing_a_middle_block():
+    blocks = [make_block(1), make_block(3)]
+    assert assemble_reply(blocks) is None
+
+
+def test_assemble_reply_accepts_blocks_out_of_order():
+    blocks = [make_block(3), make_block(1), make_block(2)]
+    reply = assemble_reply(blocks)
+    assert reply is not None
+    assert reply.command == Cmd.GETLINK
+    assert reply.length == 136
+
+
+def test_assemble_reply_ignores_a_duplicate_block():
+    """A leftover block from an earlier reply must not shift the stream."""
+    blocks = [make_block(1), make_block(2), make_block(2), make_block(3)]
+    reply = assemble_reply(blocks)
+    assert reply is not None
+    assert reply.command == Cmd.GETLINK
+    assert reply.length == 136
+
+
+def test_assemble_reply_returns_none_for_nothing():
+    assert assemble_reply([]) is None
+
+
+def test_a_desynchronised_reply_does_not_claim_a_temperature():
+    """The bug's symptom: a missing temperature with no explanation."""
+    blocks = make_realistic_blocks()
+    desynced = [blocks[1], blocks[2], blocks[1]]  # block indices 2, 3, 2
+    assert assemble_reply(desynced) is None
+    status = parse_status(desynced)
+    assert status.temperature_c is None

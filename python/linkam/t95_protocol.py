@@ -142,8 +142,10 @@ __all__ = [
     "build_start_heating_command",
     "build_stop_heating_command",
     "build_status_poll",
+    "assemble_reply",
     "parse_reply",
     "parse_status",
+    "status_from_reply",
 ]
 
 
@@ -406,6 +408,71 @@ class T95Reply:
         return self.command == Cmd.GETLINK
 
 
+def assemble_reply(blocks: list[bytes]) -> T95Reply | None:
+    """Assemble the device's reply blocks into a :class:`T95Reply`.
+
+    Returns ``None`` when the blocks do not yet form a **complete**
+    reply.
+
+    Why the blocks have to be placed by index
+    ------------------------------------------
+    A reply is split into blocks that each carry 60 bytes of the command
+    stream, and each block states its own index in byte 0 and the total
+    number of blocks in byte 1.  The blocks need not arrive in order.
+
+    Sorting them by index and concatenating their slices is *not*
+    enough, because a **missing block 1 silently shifts the stream**.
+    The reply to a status poll is three blocks, and a USB transfer can
+    drop one; if block 1 is the one that goes missing, the header is
+    then read out of block 2 -- which is all zeros -- and the reply
+    decodes as "no command, no payload" rather than as a broken reply.
+    That is exactly the failure seen on real hardware, where a poll
+    occasionally answered with the block indices ``2, 3, 2`` and the
+    temperature silently went missing.
+
+    So the blocks are placed by index, and a reply is only accepted when
+    every block from 1 to the stated count is present.
+    """
+    by_index: dict[int, bytes] = {}
+    for block in blocks:
+        if len(block) < 2:
+            continue
+        index = block[0]
+        if index == 0:
+            continue
+        # First one wins: a duplicate means a leftover block from an
+        # earlier reply, not a second copy of this one.
+        by_index.setdefault(index, block)
+
+    if not by_index:
+        return None
+
+    # The block count is in byte 1 of every block of a reply.
+    count = by_index[min(by_index)][1]
+    if count <= 0:
+        count = len(by_index)
+
+    if 1 not in by_index:
+        return None
+    if any(index not in by_index for index in range(1, count + 1)):
+        return None
+
+    stream = b"".join(
+        by_index[index][_RX_STREAM_OFFSET : _RX_STREAM_OFFSET + COMMAND_STREAM_SIZE]
+        for index in range(1, count + 1)
+    )
+
+    reply = T95Reply(blocks=list(blocks))
+    if len(stream) < COMMAND_HEADER_SIZE:
+        return reply
+
+    reply.command, reply.length, reply.param3, reply.param4 = struct.unpack_from(
+        "<HHHH", stream
+    )
+    reply.payload = stream[COMMAND_HEADER_SIZE : COMMAND_HEADER_SIZE + reply.length]
+    return reply
+
+
 def parse_reply(reports: list[bytes]) -> T95Reply:
     """Reassemble the device's reply blocks into a :class:`T95Reply`.
 
@@ -413,6 +480,12 @@ def parse_reply(reports: list[bytes]) -> T95Reply:
     they arrived.  Blocks are ordered by their own index byte rather than
     by arrival order, so a device that interleaves blocks still parses.
     """
+    reply = assemble_reply(reports)
+    if reply is not None:
+        return reply
+
+    # An incomplete set of blocks: report whatever can be read, which is
+    # better than silently claiming there is no data at all.
     indexed: list[tuple[int, bytes]] = []
     for report in reports:
         if len(report) < 2:
@@ -420,7 +493,10 @@ def parse_reply(reports: list[bytes]) -> T95Reply:
         indexed.append((report[0], report))
     indexed.sort(key=lambda item: item[0])
 
-    stream = b"".join(report[_RX_STREAM_OFFSET : _RX_STREAM_OFFSET + COMMAND_STREAM_SIZE] for _, report in indexed)
+    stream = b"".join(
+        report[_RX_STREAM_OFFSET : _RX_STREAM_OFFSET + COMMAND_STREAM_SIZE]
+        for _, report in indexed
+    )
     reply = T95Reply(blocks=list(reports))
     if len(stream) < COMMAND_HEADER_SIZE:
         return reply
@@ -475,7 +551,11 @@ def parse_status(reports: list[bytes]) -> T95Status:
 
     `reports` is the list of raw 63-byte input reports.
     """
-    reply = parse_reply(reports)
+    return status_from_reply(parse_reply(reports))
+
+
+def status_from_reply(reply: T95Reply) -> T95Status:
+    """Decode an assembled status reply into a :class:`T95Status`."""
     status = T95Status(blocks=list(reply.blocks))
     status.temperature_c = _f32(reply.payload, 0)
     status.sensor2_c = _f32(reply.payload, 4)
