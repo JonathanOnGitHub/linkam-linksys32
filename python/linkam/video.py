@@ -1155,46 +1155,34 @@ def _load_font(candidates, size: int):
 
 
 def _draw_text(image, text, font, x, y, align="left", valign="top", colour=(255, 255, 255)):
-    """Draw `text` onto the frame, with a soft shadow under it.
+    """Draw `text` onto the frame.
 
-    The shadow is a blurred copy of the text rather than a hard outline,
-    which is what makes it look like lettering rather than a stencil.
+    Plain lettering, with nothing behind it: a shadow or an outline
+    makes the numbers heavier than they need to be.
     """
     import numpy as np
-    from PIL import Image, ImageDraw, ImageFilter
+    from PIL import Image, ImageDraw
 
     if font is None:
         return
 
     h, w = image.shape[:2]
-    shadow = max(1, round(h * 0.005))
     bbox = font.getbbox(text)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     if tw <= 0 or th <= 0:
         return
 
-    pad = shadow * 3
-    size = (tw + pad * 2, th + pad * 2)
-
     # The text's own origin, so the glyphs sit where they should.
-    ox, oy = pad - bbox[0], pad - bbox[1]
+    ox, oy = -bbox[0], -bbox[1]
 
-    soft = Image.new("RGBA", size, (0, 0, 0, 0))
-    ImageDraw.Draw(soft).text(
-        (ox + shadow, oy + shadow), text, font=font, fill=(0, 0, 0, 150)
-    )
-    soft = soft.filter(ImageFilter.GaussianBlur(shadow * 0.9))
-
-    crisp = Image.new("RGBA", size, (0, 0, 0, 0))
-    ImageDraw.Draw(crisp).text((ox, oy), text, font=font, fill=colour + (255,))
-
-    layer = Image.alpha_composite(soft, crisp)
+    layer = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text((ox, oy), text, font=font, fill=colour + (255,))
 
     # Where the text goes.
     left = x - tw if align == "right" else x
     top = y if valign == "top" else y - th
-    x0 = left - pad
-    y0 = top - pad
+    x0 = left
+    y0 = top
 
     # Only the block the text covers is touched.
     cx0 = max(0, x0)

@@ -410,10 +410,10 @@ to the recording.  A recorded file therefore carries its own numbers:
 any frame of it can be read on its own, later, without a sidecar.
 
 The letters are drawn with a real font — the same stack the page uses,
-so the video and the page look like one thing — and with a soft shadow
-under them rather than a hard outline, so they read against any image.
-Pillow draws them; on a machine without it the frames fall back to
-OpenCV's own lettering.
+so the video and the page look like one thing — and plain, with nothing
+behind them: a shadow or an outline makes the numbers heavier than
+they need to be.  Pillow draws them; on a machine without it the
+frames fall back to OpenCV's own lettering.
 
 The camera is **best-effort**: the temperature link is the important
 one, and a camera that will not open, or that stops mid-programme, does
