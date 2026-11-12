@@ -38,7 +38,15 @@ cd ~/Documents/Nottingham/Research/Linkam/linkam-linksys32/python
 
 # 3. watch it change
 .venv/bin/python -m linkam.cli read --hid --count 60 --interval 1
+
+# 4. or use the web GUI: live temperature, ramps, and a CSV
+.venv/bin/python -m linkam.webapp --hid     # then open http://localhost:8765/
 ```
+
+> **One process at a time.**  The T95's reply blocks are
+> indistinguishable from one poll to the next, so two processes polling
+> the same hidraw node steal each other's blocks and both read
+> garbage.  Run the GUI *or* the command line, not both.
 
 > **Reading the temperature works, and so does setting it.**
 >

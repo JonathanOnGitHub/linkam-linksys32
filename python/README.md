@@ -25,6 +25,8 @@ linkam/
   simulator.py   software simulator of the programmer (no hardware needed)
   diagnostics.py environment checks (read-only, no instrument needed)
   cli.py         command-line entry point
+  webapp.py      a small web GUI: live temperature, ramps, CSV recording
+  static/index.html  the GUI's page
 PROTOCOL_NOTES.md  what was recovered, and what is still unverified
 RUNBOOK.md     step-by-step first-run checklist for real hardware
 tools/
@@ -241,6 +243,63 @@ Two behaviours to know about:
 If every write starts failing with `ETIMEDOUT`, the firmware has
 stopped servicing its OUT endpoint; power-cycle the controller (off,
 wait 10 s, on) and replug the USB cable.
+
+### The web GUI
+
+A small browser interface: the stage temperature live on screen, ramps
+and holds, multi-step programmes, and everything recorded to a CSV as
+it happens.
+
+```bash
+# start it -- this opens the instrument
+python -m linkam.webapp --hid
+
+# then open http://localhost:8765/
+```
+
+It needs no web framework — it is the standard library's
+`http.server` — so nothing has to be installed.
+
+**One process at a time.**  This matters more than usual for this
+instrument: the T95's reply blocks are indistinguishable from one poll
+to the next, so **two processes polling the same hidraw node steal each
+other's blocks** and both read garbage.  The web server is the process
+that owns the instrument; the browser is only a view, and it never
+touches the hardware.  So do not run `linkam.cli` at the same time as
+the GUI — and do not run two copies of the GUI.
+
+The page shows:
+
+* the stage temperature, large, updating twice a second, with a
+  sparkline of the last few minutes;
+* the second thermocouple (TC2), the programmed target and rate, and
+  what the programme is doing;
+* controls for a single ramp-and-hold, and for a multi-step programme
+  in the same `target:rate:hold` form the command line uses;
+* a log of the programme's phase changes, and a link to download the
+  CSV.
+
+The recording starts when the server does and goes to
+`results/webui/<timestamp>/telemetry.csv`, one row per sample:
+
+```
+timestamp,elapsed_s,temperature_c,sensor2_c,programmed_rate_c_per_min,programmed_setpoint_c,phase,event
+```
+
+`--out` puts it somewhere else, and `--host 0.0.0.0` makes it reachable
+from another machine on the network.
+
+Two things it does **not** do, because it cannot:
+
+* it does not check the setpoint or the rate against the **cable's**
+  limits, which the SDK reads from the controller.  An out-of-range
+  setpoint is accepted here and may be refused by the instrument;
+* it does not report the instrument's own view of the programme,
+  because the T95 does not report it (see `PROTOCOL_NOTES.md` §5.6.6).
+  The rate and the setpoint shown are the ones this host programmed.
+
+Starting a ramp moves the stage, so the browser asks for confirmation
+first, and there is a single always-visible **Stop** button.
 
 ### As a library
 

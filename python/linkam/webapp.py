@@ -183,10 +183,19 @@ class StageController:
         to ``results/webui/<timestamp>``.
     """
 
-    def __init__(self, programmer=None, *, output_dir=None, device=None) -> None:
+    def __init__(
+        self,
+        programmer=None,
+        *,
+        output_dir=None,
+        device="hid",
+        serial_port="/dev/ttyUSB0",
+        baud=9600,
+    ) -> None:
         self._programmer = programmer
         self._device = device
-        self._owns_programmer = programmer is None
+        self._serial_port = serial_port
+        self._baud = baud
 
         self._lock = threading.RLock()
         self._subscribers: list[queue.Queue] = []
@@ -221,9 +230,7 @@ class StageController:
             if self._device == "hid":
                 self._programmer = HidProgrammer()
             else:
-                self._programmer = LinkamProgrammer(
-                    getattr(self, "serial_port", "/dev/ttyUSB0")
-                )
+                self._programmer = LinkamProgrammer(self._serial_port, self._baud)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._csv_path = self.output_dir / "telemetry.csv"
         self._csv_file = self._csv_path.open("w", newline="")
@@ -255,7 +262,7 @@ class StageController:
         """Stop everything and close the instrument."""
         self.stop(running_only=True)
         try:
-            if self._programmer is not None and self._owns_programmer:
+            if self._programmer is not None:
                 self._programmer.close()
         except Exception:  # pragma: no cover - closing must not raise
             log.exception("could not close the programmer")
@@ -733,12 +740,9 @@ def main(argv=None) -> int:
     controller = StageController(
         output_dir=args.out,
         device="hid" if args.hid else "serial",
+        serial_port=args.serial_port,
+        baud=args.baud,
     )
-    controller.serial_port = args.serial_port  # type: ignore[attr-defined]
-    if not args.hid:
-        controller._programmer = LinkamProgrammer(  # type: ignore[attr-defined]
-            args.serial_port, args.baud
-        )
 
     try:
         controller.open()
