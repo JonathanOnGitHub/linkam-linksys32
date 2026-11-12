@@ -977,7 +977,21 @@ def _urls(servers, host: str, port: int) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def _make_camera(args) -> CameraFeed | None:
+def _resolve_mode(args) -> tuple[bool, str]:
+    """Whether to simulate the stage, and which camera to use.
+
+    ``--demo`` means "nothing attached": the stage is simulated and,
+    unless a camera was asked for by name, the camera's frames are
+    drawn.  So the whole page can be looked at with no hardware.
+    """
+    simulate = args.simulate or args.demo
+    camera = args.camera
+    if args.demo and camera == "none":
+        camera = "synthetic"
+    return simulate, camera
+
+
+def _make_camera(args, backend: str) -> CameraFeed | None:
     """Build the camera feed, if one was asked for.
 
     The camera is optional, and a camera that will not open is not a
@@ -986,12 +1000,12 @@ def _make_camera(args) -> CameraFeed | None:
     feed is built, and if the camera cannot be opened the feed says so
     and the GUI carries on without it.
     """
-    if args.camera == "none":
+    if backend == "none":
         return None
 
     from .video import AravisBackend, SyntheticBackend, maybe_reexec_for_aravis
 
-    if args.camera == "aravis":
+    if backend == "aravis":
         # The dynamic linker reads LD_LIBRARY_PATH once, when the process
         # starts, so a local Aravis can only be found by starting again
         # with the right environment.  This replaces the process, so it
@@ -1038,6 +1052,10 @@ def main(argv=None) -> int:
     parser.add_argument("--simulate", action="store_true",
                         help="run against the software simulator instead of "
                              "an instrument (nothing is moved)")
+    parser.add_argument("--demo", action="store_true",
+                        help="open the GUI with nothing attached at all: the "
+                             "stage and the camera are both simulated, so "
+                             "the page can be looked at with no hardware")
     parser.add_argument("--camera", default="none",
                         choices=("none", "aravis", "synthetic"),
                         help="the camera to show: 'aravis' is a GenICam "
@@ -1069,9 +1087,13 @@ def main(argv=None) -> int:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
-    camera = _make_camera(args)
+    # --demo means "nothing attached": the stage is simulated and, unless
+    # a camera was asked for by name, the camera's frames are drawn.
+    simulate, camera_backend = _resolve_mode(args)
 
-    if args.simulate:
+    camera = _make_camera(args, camera_backend)
+
+    if simulate:
         from .simulator import SimulatedProgrammer
 
         controller = StageController(

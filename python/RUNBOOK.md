@@ -574,6 +574,16 @@ without touching the instrument:
 .venv/bin/python -m linkam.simulator --target 95 --rate 20 --duration 10
 ```
 
+To look at the **web GUI** with nothing attached — no T95, no camera —
+use the GUI's own rehearsal mode.  The stage is simulated and the
+camera's frames are drawn, so the whole page can be looked at, and
+clicked on:
+
+```bash
+.venv/bin/python -m linkam.webapp --demo
+# then open http://127.0.0.1:8765/
+```
+
 ---
 
 ## Troubleshooting quick reference

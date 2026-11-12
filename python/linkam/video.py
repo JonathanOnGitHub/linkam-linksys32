@@ -516,8 +516,25 @@ _ARAVIS_PIXEL_FORMATS = {
 
 
 def _aravis_prefix() -> str:
-    """Where a locally unpacked Aravis is, if there is one."""
-    return os.environ.get("ARAVIS_PREFIX", ARAVIS_PREFIX)
+    """Where a locally unpacked Aravis is, if there is one.
+
+    ``ARAVIS_PREFIX`` says so if it is set.  Otherwise the usual
+    places are tried: an ``aravis-root`` beside the program or in the
+    working directory, and the scratch directory the microscope's own
+    tool uses.
+    """
+    if os.environ.get("ARAVIS_PREFIX"):
+        return os.environ["ARAVIS_PREFIX"]
+    package = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        os.path.join(os.getcwd(), "aravis-root"),
+        os.path.join(os.path.dirname(package), "aravis-root"),
+        ARAVIS_PREFIX,
+    ]
+    for candidate in candidates:
+        if os.path.isdir(os.path.join(candidate, "usr", "lib")):
+            return candidate
+    return ARAVIS_PREFIX
 
 
 def _import_aravis():

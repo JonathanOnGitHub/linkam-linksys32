@@ -258,7 +258,15 @@ python -m linkam.webapp --hid
 
 # or try it with no hardware at all -- nothing is moved
 python -m linkam.webapp --simulate
+
+# or look at the whole page, stage and camera both simulated
+python -m linkam.webapp --demo
 ```
+
+`--demo` opens the page with **nothing attached**: the stage is
+simulated and the camera's frames are drawn, so the whole interface --
+the plot, the live picture, the numbers burned into the frames and the
+recording -- can be looked at, and clicked on, with no hardware at all.
 
 It listens on **both** `127.0.0.1` and `::1`, and prints the URLs it is
 serving.  Both matter: on this machine `getent ahosts localhost`
@@ -668,6 +676,16 @@ python -m linkam.simulator --target 95 --rate 20 --duration 10
 
 It prints telemetry exactly as the hardware would send it, and reports the
 commands it received.
+
+The web GUI has its own rehearsal mode, which covers the camera as
+well:
+
+```bash
+python -m linkam.webapp --demo
+```
+
+The stage is simulated and the camera's frames are drawn, so the page
+can be looked at and clicked on with nothing attached.
 
 ---
 

@@ -4,6 +4,10 @@
 # bulk string dumps. They are deliberately not published.
 backup/
 
+# Aravis, unpacked from the Debian packages into a local prefix when
+# it is not installed system-wide.  A vendor artefact, not source.
+aravis-root/
+
 # Recorded runs: the telemetry CSVs and the programme results.  These
 # are data, not source.
 results/

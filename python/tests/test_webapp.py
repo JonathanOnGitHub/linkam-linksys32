@@ -581,22 +581,36 @@ def test_the_video_stream_is_multipart(camera_server):
 
 
 def test_recording_starts_with_the_programme(camera_controller, tmp_path):
-    """The video is recorded while the programme runs, and stops with it."""
+    """The video is recorded while the programme runs, and stops with it.
+
+    The fake programme finishes in a moment, so the recording is checked
+    through the log rather than by polling for it: it must have started
+    with the programme and stopped with it.
+    """
     ctl, feed = camera_controller
     ctl.set_record_with_programme(True)
     ctl.start_ramp(40.0, 5.0, 1.0)
 
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and not feed.state()["recording"]:
-        time.sleep(0.02)
-    assert feed.state()["recording"], "the recording started with the programme"
-    assert feed.state()["recording_path"].endswith("video.avi")
+    def messages():
+        return [e.get("message", "") for e in ctl.events()]
 
-    # The programme ends, and the recording with it.
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline and feed.state()["recording"]:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        said = messages()
+        if any("recording video to" in m for m in said) and any(
+            "the video is in" in m for m in said
+        ):
+            break
         time.sleep(0.05)
-    assert not feed.state()["recording"], "the recording stopped with it"
+
+    said = messages()
+    assert any("recording video to" in m for m in said), (
+        "the recording started with the programme"
+    )
+    assert any("the video is in" in m for m in said), (
+        "the recording stopped with it"
+    )
+    assert not feed.state()["recording"]
     assert (tmp_path / "out" / "video.avi").exists()
     assert (tmp_path / "out" / "video.json").exists()
 
@@ -677,3 +691,24 @@ def test_a_camera_that_will_not_open_does_not_stop_the_gui(tmp_path):
         assert ctl.state()["temperature_c"] == pytest.approx(30.0)
     finally:
         ctl.close()
+
+
+def test_the_demo_mode_needs_no_hardware():
+    """``--demo`` opens the whole page with nothing attached."""
+    from argparse import Namespace
+
+    from linkam.webapp import _resolve_mode
+
+    args = Namespace(simulate=False, demo=True, camera="none")
+    assert _resolve_mode(args) == (True, "synthetic")
+
+    # A camera asked for by name still wins.
+    args.camera = "aravis"
+    assert _resolve_mode(args) == (True, "aravis")
+
+    # And without it, the hardware is used as usual.
+    args.demo = False
+    assert _resolve_mode(args) == (False, "aravis")
+    args.camera = "none"
+    args.simulate = True
+    assert _resolve_mode(args) == (True, "none")
