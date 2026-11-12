@@ -30,7 +30,7 @@ RUNBOOK.md     step-by-step first-run checklist for real hardware
 tools/
   find_adapter.py  identify the instrument (USB HID) or the USB-to-RS232 adapter
   t95_hid_probe.py read-only HID reconnaissance: descriptor + framing probe
-tests/           221 tests, no hardware required
+tests/           235 tests, no hardware required
 ```
 
 > New to this, and holding real hardware? Start with **`RUNBOOK.md`** — it

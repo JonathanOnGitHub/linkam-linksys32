@@ -1,7 +1,13 @@
 # Runbook — Linkam hot-stage, first temperature test
 
 Prepared on this laptop (Debian, `jonathan-laptop`). Everything below is
-already installed and tested; the only thing missing is the hardware.
+already installed and tested.
+
+The T95 has since been connected and verified against real hardware:
+the status poll answers, the temperature is correct, and a 2 °C/min
+ramp to a 30 °C setpoint was executed by the instrument and held there
+exactly.  See `PROTOCOL_NOTES.md` §5.6 for what that confirmed and
+§5.8 for what is still unknown.
 
 ---
 
@@ -108,7 +114,7 @@ Do **not** skip the probe step and do **not** go straight to 95 °C. See
 | Repo cloned | `~/Documents/Nottingham/Research/Linkam/linkam-linksys32` |
 | Virtualenv | `python/.venv` (Python 3.14.8) |
 | Dependencies | pyserial 3.5, numpy 2.5.4, opencv-python 5.0.0, pytest 9.2.0 |
-| Test suite | 110 passed (`pytest tests/ -q`) |
+| Test suite | 235 passed (`pytest tests/ -q`) |
 | `doctor` check | 0 FAIL, 1 WARN (video — expected, see below) |
 | `socat` 1.8.1.3 | installed at `/usr/bin/socat`, for serial sniffing |
 | Adapter finder | `tools/find_adapter.py` (detects both HID and serial) |
