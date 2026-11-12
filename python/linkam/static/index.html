@@ -57,6 +57,25 @@
   canvas { width: 100%; height: 190px; display: block; margin-top: 16px; background: var(--panel2); border-radius: 8px; }
   .caption { font-size: 12px; color: var(--dim); margin-top: 6px; font-family: var(--mono); }
 
+  /* The camera. */
+  .video-wrap {
+    position: relative; background: #0b0d10; border: 1px solid var(--line);
+    border-radius: 8px; overflow: hidden; min-height: 120px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .video-wrap img { display: block; max-width: 100%; max-height: 420px; width: auto; height: auto; }
+  .video-wrap:not(.live) img { display: none; }
+  .video-wrap .waiting {
+    position: absolute; font-size: 13px; color: var(--dim); text-align: center;
+    padding: 0 20px;
+  }
+  .video-wrap.live .waiting { display: none; }
+  .check { display: flex; align-items: center; gap: 8px; text-transform: none;
+           letter-spacing: 0; font-size: 13px; color: var(--text); margin-bottom: 0; }
+  .check input { width: auto; margin: 0; }
+  .dot-rec { width: 9px; height: 9px; border-radius: 50%; background: var(--bad);
+             display: inline-block; vertical-align: middle; }
+
   label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin-bottom: 5px; }
   .field { margin-bottom: 12px; }
   input, select, textarea {
@@ -123,6 +142,24 @@
       channel. If nothing is attached to it the reading is noise — the stage
       temperature is the large number above.</p>
     </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Camera</h2>
+      <div class="video-wrap" id="videowrap">
+        <img id="video" alt="live camera feed">
+        <div class="waiting" id="videowait">no camera</div>
+      </div>
+      <div class="row" style="margin-top:12px; align-items:center">
+        <label class="check" for="v-prog">
+          <input type="checkbox" id="v-prog"> record the video with the programme
+        </label>
+        <button id="v-now" style="flex:0 0 auto">Record now</button>
+      </div>
+      <p class="hint" id="videostate"></p>
+      <p class="hint">The time is written in the lower left of the picture and
+      the temperature in the upper right. They are burned into the frames, so
+      a recording carries its own numbers.</p>
+    </div>
   </section>
 
   <section>
@@ -164,7 +201,7 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   temperature_c: null, sensor2_c: null, target_c: null, rate_c_per_min: null,
-  trend: [], running: false,
+  trend: [], running: false, camera: null,
 };
 
 // The margins of the plot, in CSS pixels: they hold the axis numbers.
@@ -294,9 +331,58 @@ function applyState(s) {
   }
   if (s.csv_path !== undefined) $("csvpath").textContent = s.csv_path || "";
   if (s.running !== undefined) state.running = s.running;
+  if (s.camera !== undefined) applyCamera(s.camera);
   $("temp").textContent = fmt(state.temperature_c, 2);
   $("tc2").textContent = fmt(state.sensor2_c, 2);
   draw();
+}
+
+/* The camera: the feed, and what it is recording. */
+function applyCamera(camera) {
+  state.camera = camera;
+  const live = !!(camera && camera.open && !camera.error);
+  if (!camera) {
+    $("videowait").textContent = "no camera";
+    $("videowrap").classList.remove("live");
+    $("videostate").textContent = "This server was started without a camera.";
+    setCameraControls(false);
+    return;
+  }
+  if (camera.error) {
+    $("videowait").textContent = camera.error;
+    $("videowrap").classList.remove("live");
+    $("videostate").textContent = "The camera is not available.";
+    setCameraControls(false);
+    return;
+  }
+  if (live) {
+    $("videowrap").classList.add("live");
+    $("videowait").textContent = "waiting for the camera";
+    if (!$("video").getAttribute("src")) $("video").src = "/api/video";
+  } else {
+    $("videowait").textContent = "the camera is not open";
+    $("videowrap").classList.remove("live");
+  }
+  setCameraControls(true);
+
+  const parts = [];
+  if (camera.recording) {
+    parts.push(`<span class="dot-rec"></span> recording ${camera.recorded_frames || 0} frames`);
+    if (camera.recording_path) parts.push(`to ${camera.recording_path}`);
+  } else {
+    parts.push("not recording");
+  }
+  $("videostate").innerHTML = parts.join(" ");
+  $("v-now").textContent = camera.recording ? "Stop recording" : "Record now";
+  if (camera.record_with_programme !== undefined) {
+    $("v-prog").checked = !!camera.record_with_programme;
+  }
+}
+
+/* The camera's controls only work when there is a camera. */
+function setCameraControls(enabled) {
+  $("v-prog").disabled = !enabled;
+  $("v-now").disabled = !enabled;
 }
 
 function draw() {
@@ -448,6 +534,18 @@ $("b-rec").addEventListener("click", async () => {
   await post("/api/recording", { recording: on });
 });
 
+$("v-prog").addEventListener("change", async (e) => {
+  await post("/api/video", { record: e.target.checked });
+});
+$("v-now").addEventListener("click", async () => {
+  const recording = state.camera && state.camera.recording;
+  await post("/api/video", { manual: !recording });
+});
+$("video").addEventListener("error", () => {
+  $("videowrap").classList.remove("live");
+  $("videowait").textContent = "the camera feed stopped";
+});
+
 window.addEventListener("resize", draw);
 
 const es = new EventSource("/api/stream");
@@ -470,6 +568,7 @@ es.onmessage = (m) => {
       state.target_c = ev.programmed_setpoint_c;
       $("target").textContent = ev.programmed_setpoint_c === null ? "--" : ev.programmed_setpoint_c + " °C";
     }
+    if (ev.camera !== undefined) applyCamera(ev.camera);
     draw();
   } else if (ev.type === "event") {
     addLog(ev);

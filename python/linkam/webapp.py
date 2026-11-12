@@ -6,7 +6,9 @@ What it does
   recorded;
 * records every sample to a CSV;
 * runs ramps and holds, single-step or multi-step, and reports what the
-  programme is doing.
+  programme is doing;
+* shows the microscope's camera live, and records it while a
+  temperature programme runs.
 
 Why a web app
 -------------
@@ -28,6 +30,9 @@ The parts are the ones the package already has:
 * :class:`linkam.protocol.HidProgrammer` (or
   :class:`linkam.protocol.LinkamProgrammer` for the serial link) owns
   the link and its background telemetry thread;
+* :class:`linkam.camera.CameraFeed` owns the camera: it captures the
+  frames, writes the time and the temperature onto them, serves them to
+  the browser and records them;
 * the CSV is written here, because the server is the only thing that
   sees every sample.
 
@@ -37,6 +42,7 @@ Usage
 
     python -m linkam.webapp --hid
     python -m linkam.webapp --hid --http-port 8765 --out results/run7
+    python -m linkam.webapp --hid --camera aravis
 
 Then open http://localhost:8765/ .
 
@@ -68,6 +74,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .camera import CameraFeed
 from .programme import Programme, ProgrammeRunner, Step
 from .protocol import HidProgrammer, LinkamProgrammer
 
@@ -75,6 +82,7 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "StageController",
+    "CameraFeed",
     "parse_steps",
     "make_server",
     "main",
@@ -182,6 +190,10 @@ class StageController:
     output_dir:
         Where the CSV and the programme results are written.  Defaults
         to ``results/webui/<timestamp>``.
+    camera:
+        The camera feed -- a :class:`~linkam.camera.CameraFeed`.  It is
+        optional: without one the GUI still runs, and the temperature
+        programme is unaffected.
     """
 
     def __init__(
@@ -192,11 +204,14 @@ class StageController:
         device="hid",
         serial_port="/dev/ttyUSB0",
         baud=9600,
+        camera: CameraFeed | None = None,
     ) -> None:
         self._programmer = programmer
         self._device = device
         self._serial_port = serial_port
         self._baud = baud
+        self._camera = camera
+        self._record_with_programme = False
 
         self._lock = threading.RLock()
         self._subscribers: list[queue.Queue] = []
@@ -259,9 +274,21 @@ class StageController:
         )
         log.info("recording to %s", self._csv_path)
 
+        if self._camera is not None:
+            # The camera is best-effort: it opens in its own thread and a
+            # camera that will not open must not stop the temperature link.
+            self._camera.set_output_dir(self.output_dir)
+            self._camera.set_state_provider(self._temperature_and_setpoint)
+            self._camera.open()
+
     def close(self) -> None:
         """Stop everything and close the instrument."""
         self.stop(running_only=True)
+        if self._camera is not None:
+            try:
+                self._camera.close()
+            except Exception:  # pragma: no cover - closing must not raise
+                log.exception("could not close the camera")
         try:
             if self._programmer is not None:
                 self._programmer.close()
@@ -370,8 +397,75 @@ class StageController:
                 "programmed_setpoint_c": setpoint,
                 "phase": phase,
                 "phase_detail": self._phase_detail,
+                "camera": self._camera_state(),
             }
         )
+
+    # -- the camera ---------------------------------------------------------- #
+    def _temperature_and_setpoint(self) -> tuple:
+        """The temperature and the setpoint, for the numbers on the frames."""
+        with self._lock:
+            return (self._last_temperature, self._programmed_setpoint)
+
+    def _camera_state(self) -> dict | None:
+        """What the UI needs to know about the camera."""
+        if self._camera is None:
+            return None
+        try:
+            state = self._camera.state()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("could not read the camera's state")
+            return None
+        state["record_with_programme"] = self._record_with_programme
+        return state
+
+    def set_record_with_programme(self, enabled: bool) -> bool:
+        """Record the video while a programme runs, or do not.
+
+        The recording starts when the programme starts and stops when it
+        ends, so the video covers the ramp and the hold and nothing else.
+        """
+        with self._lock:
+            self._record_with_programme = bool(enabled)
+            value = self._record_with_programme
+        self._emit(
+            "recording",
+            message=(
+                "the video will be recorded with the programme"
+                if value
+                else "the video will not be recorded with the programme"
+            ),
+        )
+        return value
+
+    def start_video_recording(self) -> dict:
+        """Start recording the video now, whatever the programme is doing."""
+        if self._camera is None:
+            raise RuntimeError("there is no camera")
+        path = self._camera.start_recording()
+        self._emit("recording", message=f"recording video to {path}")
+        return {"ok": True, "recording_path": str(path)}
+
+    def stop_video_recording(self) -> dict:
+        """Stop recording the video."""
+        if self._camera is None:
+            raise RuntimeError("there is no camera")
+        path = self._camera.stop_recording()
+        if path is not None:
+            self._emit("recording", message=f"the video is in {path}")
+        return {"ok": True, "recording_path": str(path) if path else None}
+
+    def _stop_video(self) -> None:
+        """Stop the recording, if one is running."""
+        if self._camera is None:
+            return
+        try:
+            path = self._camera.stop_recording()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("could not stop the video recording")
+            return
+        if path is not None:
+            self._emit("recording", message=f"the video is in {path}")
 
     # -- state -------------------------------------------------------------- #
     def state(self) -> dict:
@@ -396,6 +490,7 @@ class StageController:
                 "running": self._runner_thread is not None
                 and self._runner_thread.is_alive(),
                 "trend": [[t, v] for t, v in self._trend],
+                "camera": self._camera_state(),
             }
 
     def events(self) -> list[dict]:
@@ -447,6 +542,7 @@ class StageController:
                 + ", ".join(f"{s.target_c:g} C" for s in steps)
             ),
         )
+        self._start_video()
         thread = threading.Thread(
             target=self._run_programme,
             args=(programme,),
@@ -456,6 +552,22 @@ class StageController:
         self._runner_thread = thread
         thread.start()
         return {"ok": True, "steps": programme.total_steps}
+
+    def _start_video(self) -> None:
+        """Start recording the video, if it is armed to.
+
+        The recording covers the programme and nothing else: it starts
+        with the ramp and stops when the programme ends.
+        """
+        if self._camera is None or not self._record_with_programme:
+            return
+        try:
+            path = self._camera.start_recording()
+        except Exception as exc:
+            self._emit("error", message=f"could not record the video: {exc}")
+            log.warning("could not start the video recording: %s", exc)
+            return
+        self._emit("recording", message=f"recording video to {path}")
 
     def _run_programme(self, programme: Programme) -> None:
         """Run the programme.  This is the runner's thread."""
@@ -479,6 +591,7 @@ class StageController:
         finally:
             self._runner = None
             self._runner_thread = None
+            self._stop_video()
 
     def _on_programme_event(self, event) -> None:
         """Receive a :class:`linkam.programme.ProgrammeEvent`."""
@@ -519,6 +632,8 @@ class StageController:
             self._phase = "stopped"
             self._phase_detail = "stopped by the operator"
             self._emit("stopped", message="stopped")
+        # A programme that was stopped stops its recording with it.
+        self._stop_video()
         return {"ok": True, "stopped": stopped}
 
 
@@ -600,6 +715,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, controller.events())
         elif path == "/api/data.csv":
             self._send_csv()
+        elif path == "/api/video":
+            self._video_stream()
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -632,6 +749,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(
                     200, {"ok": True, "recording": controller.set_recording(bool(body.get("recording", True)))}
                 )
+            elif path == "/api/video":
+                self._send_json(200, self._video_command(body, controller))
             else:
                 self._send_json(404, {"error": "not found"})
         except KeyError as exc:
@@ -671,6 +790,58 @@ class _Handler(BaseHTTPRequestHandler):
             pass  # the browser went away
         finally:
             controller.unsubscribe(subscription)
+
+    # -- the camera ---------------------------------------------------------- #
+    def _video_stream(self) -> None:
+        """The live picture, as a stream of JPEG frames.
+
+        The browser gets the frames one after another in a
+        ``multipart/x-mixed-replace`` response, which is what an
+        ``<img>`` tag can display.  The numbers are already burned into
+        the frames, so what the browser shows is what is recorded.
+        """
+        camera = getattr(self.controller, "_camera", None)
+        if camera is None:
+            self._send_json(404, {"error": "there is no camera"})
+            return
+        if not camera.is_open:
+            self._send_json(503, {"error": camera.state().get("error") or "the camera is not open"})
+            return
+
+        self.send_response(200)
+        self.send_header(
+            "Content-Type", "multipart/x-mixed-replace; boundary=frame"
+        )
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        seq = -1
+        try:
+            while True:
+                jpeg, seq = camera.wait_for_frame(seq, timeout=10.0)
+                if jpeg is None:
+                    continue
+                self.wfile.write(b"--frame\r\n")
+                self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                self.wfile.write(f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii"))
+                self.wfile.write(jpeg)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # the browser went away
+
+    def _video_command(self, body: dict, controller) -> dict:
+        """The video's controls: what to record, and when."""
+        if "record" in body:
+            # Armed: the video is recorded while a programme runs.
+            enabled = controller.set_record_with_programme(bool(body["record"]))
+            return {"ok": True, "record_with_programme": enabled}
+        if "manual" in body:
+            if body["manual"]:
+                return controller.start_video_recording()
+            return controller.stop_video_recording()
+        raise ValueError("say what to do: 'record' or 'manual'")
 
     # -- the recording ------------------------------------------------------ #
     def _send_csv(self) -> None:
@@ -806,6 +977,45 @@ def _urls(servers, host: str, port: int) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
+def _make_camera(args) -> CameraFeed | None:
+    """Build the camera feed, if one was asked for.
+
+    The camera is optional, and a camera that will not open is not a
+    reason to refuse to start: the temperature programme is the
+    important one, and it must not be held up by the microscope.  So the
+    feed is built, and if the camera cannot be opened the feed says so
+    and the GUI carries on without it.
+    """
+    if args.camera == "none":
+        return None
+
+    from .video import AravisBackend, SyntheticBackend, maybe_reexec_for_aravis
+
+    if args.camera == "aravis":
+        # The dynamic linker reads LD_LIBRARY_PATH once, when the process
+        # starts, so a local Aravis can only be found by starting again
+        # with the right environment.  This replaces the process, so it
+        # never returns when it succeeds.
+        maybe_reexec_for_aravis()
+        source = AravisBackend(
+            args.camera_device,
+            exposure_us=args.camera_exposure,
+            gain_db=args.camera_gain,
+            roi=args.camera_roi,
+            fps=args.camera_fps,
+            pixel_format=args.camera_pixel_format,
+        )
+    else:
+        source = SyntheticBackend(width=640, height=480, fps=25.0)
+
+    return CameraFeed(
+        source,
+        state=lambda: (None, None),  # replaced by the controller
+        feed_width=args.video_width,
+        record_fps=args.video_fps,
+    )
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="A web GUI for the Linkam hot stage.",
@@ -828,6 +1038,29 @@ def main(argv=None) -> int:
     parser.add_argument("--simulate", action="store_true",
                         help="run against the software simulator instead of "
                              "an instrument (nothing is moved)")
+    parser.add_argument("--camera", default="none",
+                        choices=("none", "aravis", "synthetic"),
+                        help="the camera to show: 'aravis' is a GenICam "
+                             "camera (the microscope's Alvium), 'synthetic' "
+                             "draws the frames instead of capturing them")
+    parser.add_argument("--camera-device", default=None,
+                        help="the camera's id, or its index among the "
+                             "cameras that are connected")
+    parser.add_argument("--camera-roi", default=None,
+                        help="the camera's region of interest, e.g. 1280x1024")
+    parser.add_argument("--camera-exposure", type=float, default=None,
+                        help="exposure time in microseconds")
+    parser.add_argument("--camera-gain", type=float, default=None,
+                        help="gain in dB")
+    parser.add_argument("--camera-fps", type=float, default=None,
+                        help="the camera's frame rate")
+    parser.add_argument("--camera-pixel-format", default=None,
+                        help="a GenICam pixel format, e.g. Mono8")
+    parser.add_argument("--video-width", type=int, default=1280,
+                        help="how wide the picture sent to the browser is "
+                             "(the recording keeps the camera's own size)")
+    parser.add_argument("--video-fps", type=float, default=None,
+                        help="the frame rate to tag the recording with")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -836,12 +1069,15 @@ def main(argv=None) -> int:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
+    camera = _make_camera(args)
+
     if args.simulate:
         from .simulator import SimulatedProgrammer
 
         controller = StageController(
             SimulatedProgrammer(start_c=20.0, ambient_c=20.0),
             output_dir=args.out,
+            camera=camera,
         )
     else:
         controller = StageController(
@@ -849,6 +1085,7 @@ def main(argv=None) -> int:
             device="hid" if args.hid else "serial",
             serial_port=args.serial_port,
             baud=args.baud,
+            camera=camera,
         )
 
     try:

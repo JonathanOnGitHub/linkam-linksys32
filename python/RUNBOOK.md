@@ -97,6 +97,54 @@ lsusb -t                       # the tree
 
 The doctor warns when the T95 shares a root hub with a USB 3 device.
 
+### Running the microscope's camera in the web GUI
+
+The GUI can show the microscope's picture and record it while the
+temperature programme runs.  It uses the same Aravis (GenICam /
+USB3 Vision) stack as the microscope's own capture tool.
+
+```bash
+cd ~/Documents/Nottingham/Research/Linkam/linkam-linksys32/python
+
+# the camera has to be on a SuperSpeed port, and the T95 on a USB 2 hub
+.venv/bin/python -m linkam.webapp --hid --camera aravis
+
+# then open http://127.0.0.1:8765/
+```
+
+The camera is optional.  Without it the GUI runs exactly as before, and
+a camera that will not open does not stop the temperature programme —
+the page says what went wrong.
+
+Two things it needs:
+
+* **Aravis.**  Either installed system-wide
+  (`sudo apt install libaravis-0.8-0 gir1.2-aravis-0.8`), or unpacked
+  into a local prefix with `ARAVIS_PREFIX` pointing at it.  The GUI
+  restarts itself once with the right loader environment, so the
+  local-prefix route needs no extra steps.
+* **A virtual environment that can see the system's `gi`.**  The
+  GObject-introspection binding is a compiled module and cannot be
+  pip-installed, so the environment has to have been made with
+  `--system-site-packages`:
+
+  ```bash
+  python3 -m venv --system-site-packages .venv
+  ```
+
+Check it before a long run:
+
+```bash
+.venv/bin/python -c "
+import gi; gi.require_version('Aravis', '0.8')
+from gi.repository import Aravis
+Aravis.update_device_list(); print(Aravis.get_n_devices(), 'camera(s)')"
+```
+
+`0 camera(s)` means the camera is not seen: check the cable, the port
+(it must be SuperSpeed -- over USB 2.0 the control interface works
+while the stream does not), and the udev rule.
+
 ### If you have an older RS-232 programmer
 
 ```bash

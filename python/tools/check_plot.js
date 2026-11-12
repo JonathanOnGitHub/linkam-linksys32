@@ -42,12 +42,28 @@ function stubContext() {
 }
 
 function stubElement() {
-  return {
+  const el = {
     textContent: "", className: "", children: [], value: "1",
     addEventListener() {}, prepend() {}, removeChild() {},
     getContext: () => stubContext(),
-    set innerHTML(v) {}, get innerHTML() { return ""; },
+    getAttribute(name) {
+      return this._attrs && this._attrs[name] !== undefined
+        ? this._attrs[name] : null;
+    },
+    set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html || ""; },
   };
+  el._attrs = {};
+  el.classList = {
+    add(c) { if (!el.className.split(" ").includes(c)) {
+      el.className = (el.className + " " + c).trim(); } },
+    remove(c) { el.className = el.className.split(" ").filter(x => x !== c).join(" "); },
+    contains(c) { return el.className.split(" ").includes(c); },
+  };
+  Object.defineProperty(el, "src", {
+    get() { return el._attrs.src || ""; },
+    set(v) { el._attrs.src = v; },
+  });
+  return el;
 }
 
 const elements = {
@@ -71,10 +87,10 @@ global.fetch = () => Promise.resolve({ json: () => Promise.resolve([]) });
 // --------------------------------------------------------------------------- //
 
 eval(`${script[1]}\n;globalThis.page = { state, draw, temperatureTicks, timeTicks,`
-  + ` tempLabel, clockLabel, formatSpan };`);
+  + ` tempLabel, clockLabel, formatSpan, applyCamera, applyState };`);
 
 const { state, draw, temperatureTicks, timeTicks, tempLabel, clockLabel,
-        formatSpan } = globalThis.page;
+        formatSpan, applyCamera, applyState } = globalThis.page;
 
 // --------------------------------------------------------------------------- //
 // The checks
@@ -160,6 +176,31 @@ state.trend = [[t0, 20], [t0 + 1, 20]];
 draw();
 checkThat("a flat trace still gets a scale",
   texts.filter((x) => /^-?\d+(\.\d+)?$/.test(x.t)).length >= 2);
+
+// -- the camera -------------------------------------------------------------- //
+const el = (id) => document.getElementById(id);
+
+applyCamera({ open: true, error: null, recording: false, recorded_frames: 0 });
+checkThat("an open camera shows the picture", el("videowrap").classList.contains("live"));
+checkThat("the picture comes from the camera", el("video").src === "/api/video");
+checkThat("the camera's controls work", el("v-now").disabled === false);
+
+applyCamera({ open: true, error: null, recording: true, recorded_frames: 42,
+              recording_path: "/tmp/video.avi" });
+checkThat("a recording is said so", /recording 42 frames/.test(el("videostate").innerHTML));
+checkThat("the recording's file is named", /video\.avi/.test(el("videostate").innerHTML));
+checkThat("the button offers to stop it", el("v-now").textContent === "Stop recording");
+
+applyCamera({ open: false, error: "no camera is connected" });
+checkThat("a camera that is not there is not shown",
+  !el("videowrap").classList.contains("live"));
+checkThat("the reason is shown", el("videowait").textContent === "no camera is connected");
+checkThat("the camera's controls do not work", el("v-now").disabled === true);
+
+applyCamera(null);
+checkThat("no camera at all is handled",
+  !el("videowrap").classList.contains("live"));
+checkThat("and the page says so", /without a camera/.test(el("videostate").textContent));
 
 // --------------------------------------------------------------------------- //
 // The report

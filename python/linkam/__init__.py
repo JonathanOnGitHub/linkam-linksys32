@@ -13,11 +13,16 @@ Sub-modules
 ``linkam.hid``
     USB HID transport for the Linkam T95 (``16da:0002``).
 ``linkam.video``
-    Video capture backends (DirectShow on Windows, V4L2 on Linux).
+    Video capture backends (DirectShow on Windows, V4L2 and Aravis on
+    Linux).
+``linkam.camera``
+    The camera feed: live frames for the browser, and the recording of
+    them.
 ``linkam.experiment``
     Orchestration of a temperature ramp with simultaneous capture.
 """
 
+from .camera import CameraFeed
 from .experiment import Experiment, ExperimentResult, IsothermalRun
 from .hid import HidLink, HidTransport, find_link
 from .protocol import (
@@ -36,6 +41,7 @@ from .video import Frame, VideoSource, open_video
 __version__ = "0.1.0"
 
 __all__ = [
+    "CameraFeed",
     "Experiment",
     "ExperimentResult",
     "IsothermalRun",

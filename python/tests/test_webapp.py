@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from linkam.protocol import ProgrammerState, Telemetry
+from linkam.video import Frame
 from linkam.webapp import StageController, make_server, parse_steps
 
 #: The page, and the tool that checks its script.
@@ -422,7 +423,6 @@ def test_the_event_stream_opens_and_reports_the_state(server):
 # The page's own script
 # --------------------------------------------------------------------------- #
 
-
 def test_the_page_draws_a_plot_with_a_scale_on_both_axes():
     """The plot must carry numbers: degrees on one axis, times on the other.
 
@@ -440,3 +440,240 @@ def test_the_page_draws_a_plot_with_a_scale_on_both_axes():
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# The camera
+# --------------------------------------------------------------------------- #
+
+
+class FakeCamera:
+    """A camera that hands out one frame at a time.
+
+    It stands in for the microscope's camera: the frames are plain, so a
+    test can look at them.
+    """
+
+    def __init__(self, width=160, height=120):
+        self.name = "fake"
+        self.width = width
+        self.height = height
+        self.fps = 25.0
+        self.opened = 0
+        self.closed = 0
+        self.reads = 0
+
+    @property
+    def size(self):
+        return (self.width, self.height)
+
+    def open(self):
+        self.opened += 1
+
+    def close(self):
+        self.closed += 1
+
+    def read(self):
+        import numpy as np
+
+        self.reads += 1
+        image = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        image[:, :, 0] = 40
+        return Frame(image=image, timestamp=time.time(), index=self.reads)
+
+
+@pytest.fixture
+def camera_controller(tmp_path):
+    """A controller with a camera, open and ready."""
+    from linkam.camera import CameraFeed
+
+    camera = FakeCamera()
+    feed = CameraFeed(camera, output_dir=tmp_path / "out")
+    ctl = StageController(
+        FakeProgrammer(),
+        output_dir=tmp_path / "out",
+        camera=feed,
+    )
+    ctl.open()
+    yield ctl, feed
+    ctl.close()
+
+
+@pytest.fixture
+def camera_server(camera_controller):
+    """The same, with the HTTP server in front of it."""
+    ctl, feed = camera_controller
+    srv = make_server(ctl, "127.0.0.1", 0)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield ctl, feed, f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+    srv.server_close()
+
+
+def test_the_camera_opens_with_the_controller(camera_controller):
+    ctl, feed = camera_controller
+    assert feed.is_open
+    assert ctl.state()["camera"]["open"] is True
+    assert ctl.state()["camera"]["error"] is None
+
+
+def test_the_camera_produces_frames(camera_controller):
+    ctl, feed = camera_controller
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and feed.state()["frames"] < 2:
+        time.sleep(0.02)
+    assert feed.state()["frames"] >= 2
+
+
+def test_the_feed_serves_jpeg_frames(camera_controller):
+    """The browser gets a JPEG of the picture."""
+    ctl, feed = camera_controller
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and feed.latest()[0] is None:
+        time.sleep(0.02)
+    jpeg, seq = feed.latest()
+    assert jpeg is not None
+    assert seq > 0
+    assert jpeg[:2] == b"\xff\xd8", "it is a JPEG"
+    assert jpeg[-2:] == b"\xff\xd9", "and it is complete"
+
+
+def test_the_numbers_are_burned_into_the_frame(camera_controller):
+    """The frame carries the time and the temperature.
+
+    They are burned in rather than drawn over the picture in the
+    browser, so a recording carries its own numbers.
+    """
+    import cv2
+    import numpy as np
+
+    ctl, feed = camera_controller
+    ctl._programmer.emit(temperature=42.5)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and feed.latest()[0] is None:
+        time.sleep(0.02)
+
+    jpeg, _ = feed.latest()
+    image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert image is not None
+    assert image[: image.shape[0] // 2, -image.shape[1] // 2 :].any(), (
+        "the temperature is in the upper right"
+    )
+    assert image[-image.shape[0] // 4 :, : image.shape[1] // 2].any(), (
+        "the time is in the lower left"
+    )
+
+
+def test_the_video_stream_is_multipart(camera_server):
+    """The browser gets the frames one after another."""
+    ctl, feed, url = camera_server
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and feed.latest()[0] is None:
+        time.sleep(0.02)
+
+    request = urllib.request.Request(url + "/api/video")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.headers["Content-Type"].startswith("multipart/x-mixed-replace")
+        chunk = response.read(200)
+    assert chunk.startswith(b"--frame"), "it is a multipart stream"
+    assert b"image/jpeg" in chunk
+
+
+def test_recording_starts_with_the_programme(camera_controller, tmp_path):
+    """The video is recorded while the programme runs, and stops with it."""
+    ctl, feed = camera_controller
+    ctl.set_record_with_programme(True)
+    ctl.start_ramp(40.0, 5.0, 1.0)
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not feed.state()["recording"]:
+        time.sleep(0.02)
+    assert feed.state()["recording"], "the recording started with the programme"
+    assert feed.state()["recording_path"].endswith("video.avi")
+
+    # The programme ends, and the recording with it.
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and feed.state()["recording"]:
+        time.sleep(0.05)
+    assert not feed.state()["recording"], "the recording stopped with it"
+    assert (tmp_path / "out" / "video.avi").exists()
+    assert (tmp_path / "out" / "video.json").exists()
+
+
+def test_recording_can_be_started_by_hand(camera_controller, tmp_path):
+    ctl, feed = camera_controller
+    path = ctl.start_video_recording()
+    assert path["recording_path"].endswith("video.avi")
+    assert feed.state()["recording"]
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and feed.state()["recorded_frames"] < 1:
+        time.sleep(0.02)
+    assert feed.state()["recorded_frames"] >= 1
+
+    ctl.stop_video_recording()
+    assert not feed.state()["recording"]
+
+
+def test_a_second_recording_does_not_lose_the_first(camera_controller, tmp_path):
+    """Two recordings in one run get two files."""
+    ctl, feed = camera_controller
+    ctl.start_video_recording()
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and feed.state()["recorded_frames"] < 1:
+        time.sleep(0.02)
+    ctl.stop_video_recording()
+
+    ctl.start_video_recording()
+    assert feed.state()["recording_path"].endswith("video-2.avi")
+
+
+def test_the_video_can_be_armed_over_http(camera_server):
+    ctl, feed, url = camera_server
+    status, payload = post(url + "/api/video", {"record": True})
+    assert status == 200
+    assert payload["record_with_programme"] is True
+    assert ctl.state()["camera"]["record_with_programme"] is True
+
+
+def test_the_video_can_be_recorded_over_http(camera_server):
+    ctl, feed, url = camera_server
+    status, payload = post(url + "/api/video", {"manual": True})
+    assert status == 200
+    assert payload["recording_path"].endswith("video.avi")
+
+    status, payload = post(url + "/api/video", {"manual": False})
+    assert status == 200
+    assert not feed.state()["recording"]
+
+
+def test_a_camera_that_will_not_open_does_not_stop_the_gui(tmp_path):
+    """The camera is best-effort: the temperature link must not be held
+    up by the microscope."""
+    from linkam.camera import CameraFeed
+
+    class Broken:
+        name = "broken"
+
+        def open(self):
+            raise RuntimeError("no camera is connected")
+
+        def close(self):
+            pass
+
+        def read(self):
+            return None
+
+    feed = CameraFeed(Broken(), output_dir=tmp_path / "out")
+    ctl = StageController(FakeProgrammer(), output_dir=tmp_path / "out", camera=feed)
+    ctl.open()
+    try:
+        state = ctl.state()
+        assert state["camera"]["open"] is False
+        assert "no camera" in state["camera"]["error"]
+        # The temperature link still works.
+        ctl._programmer.emit(temperature=30.0)
+        assert ctl.state()["temperature_c"] == pytest.approx(30.0)
+    finally:
+        ctl.close()

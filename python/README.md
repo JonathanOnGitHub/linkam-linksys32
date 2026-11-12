@@ -288,6 +288,8 @@ The page shows:
   CSV, and the setpoint written on its own dashed line;
 * the second thermocouple (TC2), the programmed target and rate, and
   what the programme is doing;
+* the microscope's camera, live, with the **time in the lower left of
+  the picture and the temperature in the upper right**;
 * controls for a single ramp-and-hold, and for a multi-step programme
   in the same `target:rate:hold` form the command line uses;
 * a log of the programme's phase changes, and a link to download the
@@ -319,6 +321,46 @@ The page is one file of HTML with its script inline, so its script is
 checked on its own with `node tools/check_plot.js` — it runs the page's
 code against a stubbed DOM and checks the axes and the labels.  The same
 check runs with the rest of the tests, if node is installed.
+
+#### The camera in the web GUI
+
+`--camera aravis` adds the microscope's picture to the page and records
+it while a temperature programme runs:
+
+```bash
+# the microscope's camera, live, and recorded with the programme
+python -m linkam.webapp --hid --camera aravis
+
+# no camera at all -- the GUI runs exactly as before
+python -m linkam.webapp --hid
+
+# a camera that is not there: the frames are drawn instead
+python -m linkam.webapp --simulate --camera synthetic
+```
+
+Tick **record the video with the programme** and the recording starts
+when the ramp starts and stops when the programme ends, so the video
+covers the ramp and the hold and nothing else.  **Record now** starts
+one by hand.
+
+The recording goes to `results/webui/<timestamp>/video.avi` (MJPG, as
+the microscope's own capture tool writes) with a `video.json` sidecar
+beside it.  A second recording in the same run gets `video-2.avi`, so
+the first is not lost.
+
+**The numbers are burned into the frames.**  The time goes in the lower
+left of the picture and the temperature in the upper right, drawn onto
+the frame before it is sent to the browser *and* before it is written
+to the recording.  A recorded file therefore carries its own numbers:
+any frame of it can be read on its own, later, without a sidecar.
+
+The camera is **best-effort**: the temperature link is the important
+one, and a camera that will not open, or that stops mid-programme, does
+not stop the ramp — the page says what happened instead.
+
+The camera capture is the same Aravis (GenICam / USB3 Vision) stack the
+microscope's own tool uses; see `linkam/video.py` and the section on
+the camera below for what it needs.
 
 ### As a library
 
@@ -453,6 +495,66 @@ with VimbaXBackend(0, exposure_us=5000, frame_rate=30) as cam:
 # list the cameras the SDK can see
 python -c "from linkam.video import VimbaXBackend; print(VimbaXBackend.list_cameras())"
 ```
+
+## The Allied Vision camera (Aravis)
+
+`linkam/video.py` also has an `AravisBackend`, and it is the one the
+web GUI uses.  Aravis is the open-source GenICam / USB3 Vision stack,
+and it is what the microscope's own capture tool uses.
+
+Two things have to be got right, and the backend does both:
+
+* **the buffer pool.**  `create_stream()` returns an *empty* stream.
+  Aravis streams into buffers that the **application** supplies, so
+  with none pushed in the stream thread underruns in a tight loop and
+  never submits a single bulk transfer — the camera appears to work
+  while nothing reaches the wire;
+* **the link throughput limit.**  The camera throttles itself to the
+  speed it enumerated at and remembers it, so a camera moved from
+  USB 2.0 to USB 3.x stays pinned at 50 MB/s until the limit is
+  rewritten.
+
+```python
+from linkam.video import AravisBackend
+
+with AravisBackend(exposure_us=5000, roi="1280x1024") as cam:
+    frame = cam.read()
+```
+
+```bash
+# list the cameras the SDK can see
+python -c "from linkam.video import AravisBackend; print(AravisBackend.list_cameras())"
+```
+
+**What it needs.**  Aravis itself, and the GObject-introspection
+binding (`gi`), which is a compiled module and cannot be pip-installed
+on its own:
+
+```bash
+# Aravis, system-wide
+sudo apt install libaravis-0.8-0 gir1.2-aravis-0.8
+
+# or, without root, unpacked into a local prefix
+mkdir -p /tmp/aravis-debs && cd /tmp/aravis-debs
+apt-get download libaravis-0.8-0 gir1.2-aravis-0.8
+for f in *.deb; do dpkg-deb -x "$f" /tmp/aravis-root; done
+```
+
+Without `sudo`, point `ARAVIS_PREFIX` at the prefix
+(`/tmp/aravis-root` by default).  The dynamic linker reads
+`LD_LIBRARY_PATH` once, when the process starts, so a local Aravis can
+only be found by starting again with the right environment — the web
+GUI does that for you (`maybe_reexec_for_aravis`).
+
+The virtual environment has to be able to see the system's `gi`, so it
+has to have been made with the system site-packages:
+
+```bash
+python3 -m venv --system-site-packages .venv
+```
+
+The `gi` binding and the Aravis typelib are then both importable, and
+the pip packages installed into the venv still take precedence.
 
 ---
 
