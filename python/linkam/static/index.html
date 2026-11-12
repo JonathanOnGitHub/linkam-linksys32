@@ -159,7 +159,10 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { temperature_c: null, sensor2_c: null, trend: [], running: false };
+const state = {
+  temperature_c: null, sensor2_c: null, target_c: null, rate_c_per_min: null,
+  trend: [], running: false,
+};
 
 function fmt(v, digits) {
   return (v === null || v === undefined || Number.isNaN(v)) ? "--" : Number(v).toFixed(digits);
@@ -192,12 +195,16 @@ function applyState(s) {
   if (s.trend) state.trend = s.trend;
   if (s.phase !== undefined) setPhase(s.phase);
   if (s.phase_detail !== undefined) $("detail").textContent = s.phase_detail || "--";
-  if (s.programmed_rate_c_per_min !== undefined)
+  if (s.programmed_rate_c_per_min !== undefined) {
+    state.rate_c_per_min = s.programmed_rate_c_per_min;
     $("rate").textContent = s.programmed_rate_c_per_min === null ? "--"
       : s.programmed_rate_c_per_min + " °C/min";
-  if (s.programmed_setpoint_c !== undefined)
+  }
+  if (s.programmed_setpoint_c !== undefined) {
+    state.target_c = s.programmed_setpoint_c;
     $("target").textContent = s.programmed_setpoint_c === null ? "--"
       : s.programmed_setpoint_c + " °C";
+  }
   if (s.connected !== undefined) $("dot").className = "dot" + (s.connected ? " on" : "");
   if (s.recording !== undefined) {
     $("rec").textContent = s.recording ? "recording" : "paused";
@@ -225,8 +232,8 @@ function draw() {
 
   let lo = Infinity, hi = -Infinity;
   for (const p of pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
-  const target = Number($("target").textContent);
-  if (!Number.isNaN(target) && $("target").textContent !== "--") {
+  const target = state.target_c;
+  if (typeof target === "number" && Number.isFinite(target)) {
     lo = Math.min(lo, target); hi = Math.max(hi, target);
   }
   if (hi - lo < 1) { hi += 0.5; lo -= 0.5; }
@@ -237,7 +244,7 @@ function draw() {
   const Y = (v) => h - 3 - ((v - lo) / (hi - lo)) * (h - 6);
 
   // the target line
-  if (!Number.isNaN(target) && $("target").textContent !== "--") {
+  if (typeof target === "number" && Number.isFinite(target)) {
     g.strokeStyle = "rgba(77,163,255,.45)";
     g.setLineDash([4, 4]); g.beginPath();
     g.moveTo(0, Y(target)); g.lineTo(w, Y(target)); g.stroke();
@@ -305,10 +312,14 @@ es.onmessage = (m) => {
     $("tc2").textContent = fmt(ev.sensor2_c, 2);
     if (ev.phase !== undefined) setPhase(ev.phase);
     if (ev.phase_detail !== undefined) $("detail").textContent = ev.phase_detail || "--";
-    if (ev.programmed_rate_c_per_min !== undefined)
+    if (ev.programmed_rate_c_per_min !== undefined) {
+      state.rate_c_per_min = ev.programmed_rate_c_per_min;
       $("rate").textContent = ev.programmed_rate_c_per_min === null ? "--" : ev.programmed_rate_c_per_min + " °C/min";
-    if (ev.programmed_setpoint_c !== undefined)
+    }
+    if (ev.programmed_setpoint_c !== undefined) {
+      state.target_c = ev.programmed_setpoint_c;
       $("target").textContent = ev.programmed_setpoint_c === null ? "--" : ev.programmed_setpoint_c + " °C";
+    }
     draw();
   } else if (ev.type === "event") {
     addLog(ev);
@@ -317,6 +328,12 @@ es.onmessage = (m) => {
   }
 };
 es.onerror = () => { $("dot").className = "dot"; };
+
+// The event stream only carries events from now on, so the history is
+// fetched separately -- otherwise a page reload would show an empty log.
+fetch("/api/events").then(r => r.json()).then(list => {
+  list.slice().reverse().forEach(addLog);
+}).catch(() => {});
 </script>
 </body>
 </html>

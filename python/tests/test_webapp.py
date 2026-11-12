@@ -282,11 +282,39 @@ def post(url, payload):
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
+def test_the_simulator_can_drive_the_gui(tmp_path):
+    """The GUI must work against the simulator, with no hardware."""
+    from linkam.simulator import SimulatedProgrammer
+
+    ctl = StageController(SimulatedProgrammer(start_c=20.0, ambient_c=20.0),
+                          output_dir=tmp_path / "sim")
+    ctl.open()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and ctl.state()["temperature_c"] is None:
+            time.sleep(0.02)
+        state = ctl.state()
+        assert state["temperature_c"] is not None
+        assert state["connected"] is True
+
+        ctl.start_ramp(40.0, 10.0, 5.0)
+        deadline = time.monotonic() + 5.0
+        while (
+            time.monotonic() < deadline
+            and ctl.state()["programmed_setpoint_c"] is None
+        ):
+            time.sleep(0.02)
+        assert ctl._programmer.running is True
+        assert ctl.state()["programmed_setpoint_c"] == pytest.approx(40.0)
+        assert ctl.state()["programmed_rate_c_per_min"] == pytest.approx(10.0)
+    finally:
+        ctl.close()
+
+
 def test_the_page_is_served(server):
     status, body = get(server + "/")
     assert status == 200
     assert b"Linkam hot stage" in body
-
 
 def test_the_state_is_served(server):
     status, body = get(server + "/api/state")

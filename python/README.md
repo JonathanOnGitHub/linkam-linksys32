@@ -255,6 +255,9 @@ it happens.
 python -m linkam.webapp --hid
 
 # then open http://localhost:8765/
+
+# or try it with no hardware at all -- nothing is moved
+python -m linkam.webapp --simulate
 ```
 
 It needs no web framework — it is the standard library's

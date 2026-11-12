@@ -729,6 +729,9 @@ def main(argv=None) -> int:
                         help="port to listen on")
     parser.add_argument("--out", default=None,
                         help="directory for the CSV and the programme results")
+    parser.add_argument("--simulate", action="store_true",
+                        help="run against the software simulator instead of "
+                             "an instrument (nothing is moved)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -737,12 +740,20 @@ def main(argv=None) -> int:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
-    controller = StageController(
-        output_dir=args.out,
-        device="hid" if args.hid else "serial",
-        serial_port=args.serial_port,
-        baud=args.baud,
-    )
+    if args.simulate:
+        from .simulator import SimulatedProgrammer
+
+        controller = StageController(
+            SimulatedProgrammer(start_c=20.0, ambient_c=20.0),
+            output_dir=args.out,
+        )
+    else:
+        controller = StageController(
+            output_dir=args.out,
+            device="hid" if args.hid else "serial",
+            serial_port=args.serial_port,
+            baud=args.baud,
+        )
 
     try:
         controller.open()
