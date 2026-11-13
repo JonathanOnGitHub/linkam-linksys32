@@ -1010,14 +1010,24 @@ class SyntheticBackend(VideoSource):
 # --------------------------------------------------------------------------- #
 
 
-def annotate(image, *, temperature_c=None, target_c=None, when=None):
+def annotate(
+    image,
+    *,
+    temperature_c=None,
+    target_c=None,
+    when=None,
+    scale_um_per_px=None,
+):
     """Write the time and the temperature onto a frame.
 
     The **time goes in the lower left corner** and the **temperature in
-    the upper right**, both with an outline so they read against any
-    image.  They are burned into the frame rather than drawn over it in
-    the browser, so a recording carries its own numbers and does not
-    depend on a sidecar to be read.
+    the upper right**, each on a translucent plate.  They are burned into
+    the frame rather than drawn over it in the browser, so a recording
+    carries its own numbers and does not depend on a sidecar to be read.
+
+    A scale bar, if the scale is known, goes in the lower right: on the
+    same baseline as the time and ending at the same distance from the
+    right edge as the temperature, so the three things line up.
 
     Parameters
     ----------
@@ -1029,6 +1039,8 @@ def annotate(image, *, temperature_c=None, target_c=None, when=None):
         The setpoint, written under the temperature when it is known.
     when:
         The time to write, as a UNIX timestamp.  ``None`` uses now.
+    scale_um_per_px:
+        How many micrometres one pixel is.  ``None`` writes no scale bar.
     """
     if image is None:
         return image
@@ -1046,21 +1058,27 @@ def annotate(image, *, temperature_c=None, target_c=None, when=None):
     from datetime import datetime
 
     h, w = image.shape[:2]
-    margin = max(10, round(h * 0.022))
-    shadow = max(1, round(h * 0.005))
+    layout = _frame_layout(h, w)
 
     sans = _load_font(_SANS_FONTS, max(12, round(h * 0.042)))
     mono = _load_font(_MONO_FONTS, max(10, round(h * 0.034)))
     small = _load_font(_SANS_FONTS, max(9, round(h * 0.028)))
 
-    # -- the time, lower left ---------------------------------------------- #
+    # -- the time, lower left, on the baseline ------------------------------ #
     stamp = datetime.fromtimestamp(when).strftime("%H:%M:%S")
-    _draw_text(image, stamp, mono, margin, h - margin, "left", "bottom")
+    _draw_text(image, stamp, mono, layout["left"], layout["baseline"], "left", "bottom")
+
+    # How much of the bottom the clock takes, so the scale bar knows how
+    # much room is left for it.
+    time_width = 0
+    if mono is not None:
+        bbox = mono.getbbox(stamp)
+        time_width = bbox[2] - bbox[0]
 
     # -- the temperature, upper right --------------------------------------- #
     if temperature_c is not None:
         text = f"{temperature_c:.2f} °C"
-        _draw_text(image, text, sans, w - margin, margin, "right", "top")
+        _draw_text(image, text, sans, layout["right"], layout["top"], "right", "top")
 
         # -- the setpoint, under the temperature ---------------------------- #
         if target_c is not None:
@@ -1068,11 +1086,16 @@ def annotate(image, *, temperature_c=None, target_c=None, when=None):
                 image,
                 f"target {target_c:.1f} °C",
                 small,
-                w - margin,
-                margin + round(h * 0.058),
+                layout["right"],
+                layout["top"] + round(h * 0.058),
                 "right",
                 "top",
             )
+
+    # -- the scale bar, lower right, on the same baseline ------------------- #
+    if scale_um_per_px:
+        limit = layout["right"] - (layout["left"] + time_width) - round(h * 0.02)
+        draw_scale_bar(image, scale_um_per_px, layout=layout, limit=limit)
 
     return image
 
@@ -1159,6 +1182,15 @@ def _load_font(candidates, size: int):
     return font
 
 
+def _plate_pad(h: int) -> int:
+    """The margin around the lettering on its panel.
+
+    It is the same for everything written on a frame, so the panels all
+    end on the same line.
+    """
+    return max(2, round(h * 0.008))
+
+
 def _draw_text(image, text, font, x, y, align="left", valign="top", colour=(255, 255, 255)):
     """Draw `text` onto the frame, on a translucent plate.
 
@@ -1180,7 +1212,7 @@ def _draw_text(image, text, font, x, y, align="left", valign="top", colour=(255,
         return
 
     # The panel's margin, and how dark it is.
-    pad = max(2, round(h * 0.009))
+    pad = _plate_pad(h)
     size = (tw + pad * 2, th + pad * 2)
 
     layer = Image.new("RGBA", size, (0, 0, 0, 0))
@@ -1195,11 +1227,16 @@ def _draw_text(image, text, font, x, y, align="left", valign="top", colour=(255,
     # The text's own origin, so the glyphs sit where they should.
     draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=colour + (255,))
 
-    # Where the text goes.
-    left = x - tw if align == "right" else x
-    top = y if valign == "top" else y - th
-    x0 = left - pad
-    y0 = top - pad
+    # Where the panel goes.  The edge that is aligned with something else
+    # is the one given; the lettering is inset by the panel's margin.
+    if align == "right":
+        x0 = x - tw - pad * 2
+    else:
+        x0 = x
+    if valign == "top":
+        y0 = y
+    else:
+        y0 = y - th - pad * 2
 
     # Only the block the text covers is touched.
     cx0 = max(0, x0)
@@ -1281,12 +1318,32 @@ def _annotate_with_opencv(image, temperature_c, target_c, when):
     return image
 
 
-def draw_scale_bar(image, um_per_px, *, corner="lower-right", font=None):
+def _frame_layout(h: int, w: int) -> dict:
+    """Where everything written on a frame goes.
+
+    The three things -- the time, the temperature and the scale bar --
+    share one geometry, so they line up: the time and the scale bar sit
+    on the same baseline, and the scale bar and the temperature end at
+    the same distance from the right edge.
+    """
+    margin = max(10, round(h * 0.022))
+    return {
+        "margin": margin,
+        "top": margin,
+        "baseline": h - margin,
+        "left": margin,
+        "right": w - margin,
+    }
+
+
+def draw_scale_bar(image, um_per_px, *, layout=None, limit=None, font=None):
     """Draw a scale bar on a frame.
 
-    The bar's length is a round number of micrometres -- 10, 20, 50,
-    100 and so on -- that fits comfortably in the frame, so the bar can
-    be read against the picture rather than measured off it.
+    The bar sits on the same baseline as the clock and ends at the same
+    distance from the right edge as the temperature, so the three things
+    written on a frame line up.  Its length is a round number of
+    micrometres -- 10, 20, 50, 100 and so on -- and the largest one that
+    fits in the space there is used, so the whole bar is always shown.
 
     Parameters
     ----------
@@ -1294,9 +1351,12 @@ def draw_scale_bar(image, um_per_px, *, corner="lower-right", font=None):
         The frame, as a BGR array.  It is modified in place.
     um_per_px:
         How many micrometres one pixel is.
-    corner:
-        Which corner to put the bar in.  The default is the lower
-        right, which is clear of the time and the temperature.
+    layout:
+        The frame's geometry, from :func:`_frame_layout`.  ``None`` works
+        it out from the frame.
+    limit:
+        The most width the bar may take.  ``None`` means half the
+        picture.
     font:
         The font for the label.  ``None`` uses the same sans as the rest
         of the lettering.
@@ -1308,40 +1368,53 @@ def draw_scale_bar(image, um_per_px, *, corner="lower-right", font=None):
         return image
 
     h, w = image.shape[:2]
-    total_um = w * um_per_px
-    bar_um = _nice_length(total_um * 0.25)
-    bar_px = bar_um / um_per_px
-    if bar_px < 4 or bar_px > w * 0.9:
-        return image
+    if layout is None:
+        layout = _frame_layout(h, w)
+    if limit is None:
+        limit = (layout["right"] - layout["left"]) / 2
 
     if font is None:
         font = _load_font(_SANS_FONTS, max(10, round(h * 0.028)))
     if font is None:
         return image
 
-    label = f"{bar_um:g} µm"
-    bbox = font.getbbox(label)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-
-    margin = max(8, round(h * 0.018))
-    pad = max(2, round(h * 0.006))
+    pad = _plate_pad(h)
     thick = max(2, round(h * 0.004))
     tick = max(3, round(h * 0.008))
 
-    # The bar and its label, laid out from the corner.
-    bar_w = int(round(bar_px))
-    block_w = max(bar_w, tw) + pad * 2
-    block_h = th + pad * 2 + tick
+    # The largest round length that fits in the space there is.
+    total_um = w * um_per_px
+    bar_um = None
+    bar_px = 0.0
+    label = ""
+    label_w = 0
+    for candidate in reversed(_LENGTH_LADDER):
+        if candidate > total_um:
+            continue
+        pixels = candidate / um_per_px
+        text = f"{candidate:g} µm"
+        bbox = font.getbbox(text)
+        width = bbox[2] - bbox[0]
+        if max(pixels, width) + pad * 2 > limit:
+            continue
+        if pixels < thick * 2:
+            continue
+        bar_um, bar_px, label, label_w = candidate, pixels, text, width
+        break
+    if bar_um is None:
+        return image
 
-    if corner == "lower-right":
-        x0 = w - margin - block_w
-        y0 = h - margin - block_h
-    elif corner == "lower-left":
-        x0 = margin
-        y0 = h - margin - block_h
-    else:
-        x0 = w - margin - block_w
-        y0 = margin
+    # The block: the label above the bar, the whole thing ending at the
+    # right-hand edge with the temperature and sitting on the same
+    # baseline as the clock.
+    bbox = font.getbbox(label)
+    label_h = bbox[3] - bbox[1]
+    gap = max(2, round(h * 0.004))
+    block_w = int(round(max(bar_px, label_w) + pad * 2))
+    block_h = label_h + gap + tick + thick
+
+    x0 = layout["right"] - block_w
+    y0 = layout["baseline"] - block_h
 
     layer = Image.new("RGBA", (block_w, block_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
@@ -1352,16 +1425,23 @@ def draw_scale_bar(image, um_per_px, *, corner="lower-right", font=None):
     except AttributeError:  # pragma: no cover - Pillow before 8.2
         draw.rectangle([0, 0, block_w - 1, block_h - 1], fill=(0, 0, 0, PLATE_ALPHA))
 
-    # The label, above the bar.
-    draw.text((pad - bbox[0], pad - bbox[1]), label, font=font, fill=(255, 255, 255, 255))
+    # The label, right-aligned with the block and at the top of it.
+    draw.text(
+        (block_w - pad - label_w, -bbox[1]),
+        label,
+        font=font,
+        fill=(255, 255, 255, 255),
+    )
 
-    # The bar itself, with a tick at each end.
-    bar_x = pad + (max(bar_w, tw) - bar_w) // 2
-    bar_y = block_h - pad - thick
+    # The bar itself, with a tick at each end, its bottom on the
+    # baseline the clock sits on.
+    bar_w = int(round(bar_px))
+    bar_x = block_w - pad - bar_w
+    bar_y = block_h - thick
     draw.rectangle([bar_x, bar_y, bar_x + bar_w - 1, bar_y + thick - 1], fill=(255, 255, 255, 255))
-    draw.rectangle([bar_x, bar_y - tick, bar_x + thick - 1, bar_y + thick], fill=(255, 255, 255, 255))
+    draw.rectangle([bar_x, bar_y - tick, bar_x + thick - 1, bar_y + thick - 1], fill=(255, 255, 255, 255))
     draw.rectangle(
-        [bar_x + bar_w - thick, bar_y - tick, bar_x + bar_w - 1, bar_y + thick],
+        [bar_x + bar_w - thick, bar_y - tick, bar_x + bar_w - 1, bar_y + thick - 1],
         fill=(255, 255, 255, 255),
     )
 
@@ -1389,26 +1469,40 @@ def _nice_length(target_um: float) -> float:
     The ladder is the usual one for a scale bar: 1, 2, 5 and 10 times a
     power of ten, and the same again in millimetres.
     """
-    ladder = []
-    value = 0.01
-    while value <= 100000:
-        ladder.append(value)
-        for mult in (1, 2, 5):
-            candidate = value * mult
-            if candidate not in ladder:
-                ladder.append(candidate)
-        value *= 10
-    ladder.sort()
-
     best = None
-    for candidate in ladder:
+    for candidate in _LENGTH_LADDER:
         if candidate <= target_um:
             best = candidate
         else:
             break
     if best is None:
-        best = ladder[0]
+        best = _LENGTH_LADDER[0]
     return best
+
+
+#: The round lengths a scale bar may have, in micrometres.
+_LENGTH_LADDER = []
+
+
+def _build_length_ladder() -> None:
+    """Fill in the ladder of round lengths.
+
+    One, two and five times a power of ten, from ten nanometres to a
+    hundred millimetres.
+    """
+    value = 0.01
+    while value <= 100000:
+        _LENGTH_LADDER.append(value)
+        for mult in (1, 2, 5):
+            candidate = value * mult
+            if candidate not in _LENGTH_LADDER:
+                _LENGTH_LADDER.append(candidate)
+        value *= 10
+    _LENGTH_LADDER.sort()
+
+
+_build_length_ladder()
+
 
 
 BACKENDS = {

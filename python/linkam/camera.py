@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .video import VideoSource, annotate, draw_scale_bar
+from .video import VideoSource, annotate
 
 log = logging.getLogger(__name__)
 
@@ -182,9 +182,8 @@ class CameraFeed:
                 temperature_c=temperature,
                 target_c=target,
                 when=frame.timestamp,
+                scale_um_per_px=self._um_per_px,
             )
-            if self._um_per_px:
-                draw_scale_bar(image, self._um_per_px)
             self._captured += 1
             self._write_frame(image, temperature)
             self._publish(image)

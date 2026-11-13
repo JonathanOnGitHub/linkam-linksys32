@@ -78,8 +78,9 @@ def test_the_numbers_sit_on_a_flat_plate():
     left = 640 - margin - (bbox[2] - bbox[0])
     top = margin
 
-    # A strip just above the letters: the panel, and nothing else.
-    strip = bright[top - 3 : top - 1, left + 12 : left + 40].max(axis=2)
+    # A strip in the panel's margin, above the letters: the panel, and
+    # nothing else.
+    strip = bright[top : top + 3, left + 12 : left + 40].max(axis=2)
     assert (strip < 200).all(), "the panel is there"
     assert strip.std() < 1.0, "and it is flat, not a blur"
     assert strip.max() > 40, "and the picture shows through it"
@@ -137,6 +138,50 @@ def test_the_scale_bar_is_drawn_in_the_corner(frame):
     draw_scale_bar(frame, 0.25)
     assert _ink(frame, (380, 480, 400, 640)) > 0, "the bar is there"
     assert _ink(frame, (0, 120, 400, 640)) == 0, "and not in the way of the numbers"
+
+
+def test_the_scale_bar_lines_up_with_the_time_and_the_temperature(frame):
+    """The bar is on the clock's baseline and ends with the temperature.
+
+    The three things written on a frame share one geometry, so they read
+    as one set rather than as three separate labels.  The panels are
+    measured, because it is their edges that line up.
+    """
+    from linkam.video import annotate
+
+    bright = np.full((480, 640, 3), 200, dtype=np.uint8)
+    annotate(bright, temperature_c=95.25, when=time.time(), scale_um_per_px=0.25)
+    panel = bright.max(axis=2) < 200
+
+    clock_rows = np.where(panel[:, :250].any(axis=1))[0]
+    bar_rows = np.where(panel[:, 300:].any(axis=1))[0]
+    assert len(clock_rows) and len(bar_rows), "there are panels"
+    assert clock_rows.max() == bar_rows.max(), "the same baseline"
+
+    temperature_cols = np.where(panel[:120, :].any(axis=0))[0]
+    bar_cols = np.where(panel[400:, :].any(axis=0))[0]
+    assert len(temperature_cols) and len(bar_cols), "there are panels"
+    assert temperature_cols.max() == bar_cols.max(), "the same right edge"
+
+
+def test_the_scale_bar_does_not_run_into_the_clock(frame):
+    """There is room for the whole of it."""
+    from linkam.video import annotate
+
+    # What the clock takes, on its own: it is along the bottom.
+    clock_only = np.zeros((480, 640, 3), dtype=np.uint8)
+    annotate(clock_only, temperature_c=95.25, when=time.time())
+    clock_ink = clock_only.max(axis=2) > 40
+    clock_cols = np.where(clock_ink[430:, :].any(axis=0))[0]
+
+    # A scale so coarse that the bar would want the whole width.
+    both = np.zeros((480, 640, 3), dtype=np.uint8)
+    annotate(both, temperature_c=95.25, when=time.time(), scale_um_per_px=20.0)
+    bar_ink = (both.max(axis=2) > 40) & ~clock_ink
+    bar_cols = np.where(bar_ink[430:, :].any(axis=0))[0]
+
+    assert len(clock_cols) and len(bar_cols), "there is lettering"
+    assert bar_cols.min() > clock_cols.max(), "the bar stops short of the clock"
 
 
 def test_no_scale_bar_without_a_scale(frame):

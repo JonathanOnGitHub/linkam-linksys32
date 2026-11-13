@@ -312,6 +312,12 @@ of every frame — with the round number of micrometres it stands for —
 so the recording carries its own scale.  The scale can also be typed in
 directly, for anyone who would rather not use a pointing device.
 
+The three things written on a frame share one geometry, so they read as
+one set: the bar sits on the **same baseline as the clock** and ends
+at the **same distance from the right edge as the temperature**.  The
+bar is always the longest round length that fits in the space left, so
+the whole of it is shown and it never runs into the clock.
+
 **Where the data goes.**  *Save to…* in the header opens a pop-up that
 chooses the folder.  The name defaults to the date and the time
 (`experiment-20261112-191503`) and a prefix can be added to it
