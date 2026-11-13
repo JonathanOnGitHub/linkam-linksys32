@@ -1281,6 +1281,136 @@ def _annotate_with_opencv(image, temperature_c, target_c, when):
     return image
 
 
+def draw_scale_bar(image, um_per_px, *, corner="lower-right", font=None):
+    """Draw a scale bar on a frame.
+
+    The bar's length is a round number of micrometres -- 10, 20, 50,
+    100 and so on -- that fits comfortably in the frame, so the bar can
+    be read against the picture rather than measured off it.
+
+    Parameters
+    ----------
+    image:
+        The frame, as a BGR array.  It is modified in place.
+    um_per_px:
+        How many micrometres one pixel is.
+    corner:
+        Which corner to put the bar in.  The default is the lower
+        right, which is clear of the time and the temperature.
+    font:
+        The font for the label.  ``None`` uses the same sans as the rest
+        of the lettering.
+    """
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    if image is None or not um_per_px or um_per_px <= 0:
+        return image
+
+    h, w = image.shape[:2]
+    total_um = w * um_per_px
+    bar_um = _nice_length(total_um * 0.25)
+    bar_px = bar_um / um_per_px
+    if bar_px < 4 or bar_px > w * 0.9:
+        return image
+
+    if font is None:
+        font = _load_font(_SANS_FONTS, max(10, round(h * 0.028)))
+    if font is None:
+        return image
+
+    label = f"{bar_um:g} µm"
+    bbox = font.getbbox(label)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    margin = max(8, round(h * 0.018))
+    pad = max(2, round(h * 0.006))
+    thick = max(2, round(h * 0.004))
+    tick = max(3, round(h * 0.008))
+
+    # The bar and its label, laid out from the corner.
+    bar_w = int(round(bar_px))
+    block_w = max(bar_w, tw) + pad * 2
+    block_h = th + pad * 2 + tick
+
+    if corner == "lower-right":
+        x0 = w - margin - block_w
+        y0 = h - margin - block_h
+    elif corner == "lower-left":
+        x0 = margin
+        y0 = h - margin - block_h
+    else:
+        x0 = w - margin - block_w
+        y0 = margin
+
+    layer = Image.new("RGBA", (block_w, block_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    try:
+        draw.rounded_rectangle(
+            [0, 0, block_w - 1, block_h - 1], radius=pad, fill=(0, 0, 0, PLATE_ALPHA)
+        )
+    except AttributeError:  # pragma: no cover - Pillow before 8.2
+        draw.rectangle([0, 0, block_w - 1, block_h - 1], fill=(0, 0, 0, PLATE_ALPHA))
+
+    # The label, above the bar.
+    draw.text((pad - bbox[0], pad - bbox[1]), label, font=font, fill=(255, 255, 255, 255))
+
+    # The bar itself, with a tick at each end.
+    bar_x = pad + (max(bar_w, tw) - bar_w) // 2
+    bar_y = block_h - pad - thick
+    draw.rectangle([bar_x, bar_y, bar_x + bar_w - 1, bar_y + thick - 1], fill=(255, 255, 255, 255))
+    draw.rectangle([bar_x, bar_y - tick, bar_x + thick - 1, bar_y + thick], fill=(255, 255, 255, 255))
+    draw.rectangle(
+        [bar_x + bar_w - thick, bar_y - tick, bar_x + bar_w - 1, bar_y + thick],
+        fill=(255, 255, 255, 255),
+    )
+
+    x1 = max(0, x0)
+    y1 = max(0, y0)
+    x2 = min(w, x0 + block_w)
+    y2 = min(h, y0 + block_h)
+    if x2 <= x1 or y2 <= y1:
+        return image
+    crop = layer.crop((x1 - x0, y1 - y0, x1 - x0 + (x2 - x1), y1 - y0 + (y2 - y1)))
+
+    arr = np.array(crop).astype(np.float32)
+    alpha = arr[:, :, 3:4] / 255.0
+    bgr = arr[:, :, :3][:, :, ::-1]
+    region = image[y1:y2, x1:x2].astype(np.float32)
+    image[y1:y2, x1:x2] = np.clip(
+        region * (1.0 - alpha) + bgr * alpha, 0, 255
+    ).astype(np.uint8)
+    return image
+
+
+def _nice_length(target_um: float) -> float:
+    """A round number of micrometres near `target_um`.
+
+    The ladder is the usual one for a scale bar: 1, 2, 5 and 10 times a
+    power of ten, and the same again in millimetres.
+    """
+    ladder = []
+    value = 0.01
+    while value <= 100000:
+        ladder.append(value)
+        for mult in (1, 2, 5):
+            candidate = value * mult
+            if candidate not in ladder:
+                ladder.append(candidate)
+        value *= 10
+    ladder.sort()
+
+    best = None
+    for candidate in ladder:
+        if candidate <= target_um:
+            best = candidate
+        else:
+            break
+    if best is None:
+        best = ladder[0]
+    return best
+
+
 BACKENDS = {
     "dshow": DirectShowBackend,
     "v4l2": V4L2Backend,

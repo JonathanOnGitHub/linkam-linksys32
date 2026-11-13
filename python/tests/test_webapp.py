@@ -779,9 +779,47 @@ def test_the_video_can_be_recorded_over_http(camera_server):
     assert not feed.state()["recording"]
 
 
+def test_the_scale_can_be_set_from_two_clicks(camera_controller):
+    """Two clicks and a distance in micrometres give the scale."""
+    ctl, feed = camera_controller
+    assert feed.scale()["set"] is False
+
+    scale = feed.set_scale(100, 100, 500, 100, 100.0)
+    assert scale["set"] is True
+    assert scale["um_per_px"] == pytest.approx(0.25)
+    assert scale["measured_px"] == pytest.approx(400.0)
+    assert ctl.state()["camera"]["scale"]["set"] is True
+
+
+def test_the_scale_can_be_set_over_http(camera_server):
+    ctl, feed, url = camera_server
+    status, payload = post(
+        url + "/api/scale",
+        {"x1": 0, "y1": 0, "x2": 200, "y2": 0, "microns": 50},
+    )
+    assert status == 200
+    assert payload["ok"]
+    assert payload["scale"]["um_per_px"] == pytest.approx(0.25)
+
+
+def test_the_scale_can_be_cleared(camera_server):
+    ctl, feed, url = camera_server
+    feed.set_scale(0, 0, 200, 0, 50)
+    status, payload = post(url + "/api/scale", {"clear": True})
+    assert status == 200
+    assert payload["scale"]["set"] is False
+
+
+def test_a_scale_of_nothing_is_refused(camera_server):
+    ctl, feed, url = camera_server
+    status, payload = post(
+        url + "/api/scale", {"x1": 0, "y1": 0, "x2": 0, "y2": 0, "microns": 10}
+    )
+    assert status == 400
+    assert "error" in payload
+
+
 def test_a_camera_that_will_not_open_does_not_stop_the_gui(tmp_path):
-    """The camera is best-effort: the temperature link must not be held
-    up by the microscope."""
     from linkam.camera import CameraFeed
 
     class Broken:

@@ -590,6 +590,14 @@ The name defaults to the date and the time, and a prefix can be added
 to it — `run7-experiment-20261112-191503` — so a run can be found again
 afterwards.  The folders of the machine can be browsed in the pop-up.
 
+**The scale bar.**  The picture needs a scale to be worth anything.
+*Scale bar* in the camera card turns on measuring: click twice on the
+picture and say how far apart the two clicks are in reality — the eye
+scale on the stage, a graticule, whatever is to hand.  From then on the
+bar is drawn into every frame, the recording included.  If the scale is
+known already, it can be typed in instead (µm a pixel), which is the
+way to do it without a mouse.
+
 ---
 
 ## Troubleshooting quick reference

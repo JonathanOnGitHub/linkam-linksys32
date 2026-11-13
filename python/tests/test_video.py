@@ -117,3 +117,30 @@ def test_a_real_font_is_used_when_there_is_one():
     pytest.importorskip("PIL")
     assert _load_font(_SANS_FONTS, 20) is not None, "a sans font"
     assert _load_font(_MONO_FONTS, 20) is not None, "a monospace font"
+
+
+def test_the_scale_bar_is_a_round_number_of_micrometres():
+    from linkam.video import _nice_length
+
+    assert _nice_length(80) == 50
+    assert _nice_length(800) == 500
+    assert _nice_length(1234) == 1000
+    assert _nice_length(12) == 10
+    assert _nice_length(0.05) == 0.05
+    assert _nice_length(0.03) == 0.02
+
+
+def test_the_scale_bar_is_drawn_in_the_corner(frame):
+    """It is in the lower right, clear of the time and the temperature."""
+    from linkam.video import draw_scale_bar
+
+    draw_scale_bar(frame, 0.25)
+    assert _ink(frame, (380, 480, 400, 640)) > 0, "the bar is there"
+    assert _ink(frame, (0, 120, 400, 640)) == 0, "and not in the way of the numbers"
+
+
+def test_no_scale_bar_without_a_scale(frame):
+    from linkam.video import draw_scale_bar
+
+    draw_scale_bar(frame, 0)
+    assert not frame.any(), "nothing is drawn"

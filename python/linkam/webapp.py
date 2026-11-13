@@ -821,6 +821,8 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/video":
                 self._send_json(200, self._video_command(body, controller))
+            elif path == "/api/scale":
+                self._send_json(200, self._scale_command(body, controller))
             elif path == "/api/output":
                 self._send_json(200, self._output_command(body, controller))
             else:
@@ -864,6 +866,33 @@ class _Handler(BaseHTTPRequestHandler):
             controller.unsubscribe(subscription)
 
     # -- the camera ---------------------------------------------------------- #
+    def _scale_command(self, body: dict, controller) -> dict:
+        """Set or clear the scale bar.
+
+        The two points are in pixels of the picture and the distance
+        between them is however many micrometres the user says it is.
+        """
+        camera = controller._camera
+        if camera is None:
+            raise RuntimeError("there is no camera")
+        if body.get("clear"):
+            camera.clear_scale()
+            return {"ok": True, "scale": camera.scale()}
+        try:
+            x1 = float(body["x1"])
+            y1 = float(body["y1"])
+            x2 = float(body["x2"])
+            y2 = float(body["y2"])
+            microns = float(body["microns"])
+        except KeyError as exc:
+            raise ValueError(f"missing field {exc}") from None
+        scale = camera.set_scale(x1, y1, x2, y2, microns)
+        controller._emit(
+            "recording",
+            message=f"the scale bar is {scale['um_per_px']:.4g} µm a pixel",
+        )
+        return {"ok": True, "scale": scale}
+
     def _video_stream(self) -> None:
         """The live picture, as a stream of JPEG frames.
 

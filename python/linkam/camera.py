@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .video import VideoSource, annotate
+from .video import VideoSource, annotate, draw_scale_bar
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ class CameraFeed:
         self._record_fps = record_fps
         self._jpeg_quality = jpeg_quality
 
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._frame_cv = threading.Condition(self._lock)
         self._jpeg: bytes | None = None
         self._seq = 0
@@ -96,6 +96,11 @@ class CameraFeed:
         self._recording_started: float | None = None
         self._recording_frames = 0
         self._recording_range: list[float | None] = [None, None]
+
+        #: How many micrometres one pixel is, once the user has said so.
+        self._um_per_px: float | None = None
+        #: The two points the user clicked, in pixels of the picture.
+        self._scale_points: tuple | None = None
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -178,6 +183,8 @@ class CameraFeed:
                 target_c=target,
                 when=frame.timestamp,
             )
+            if self._um_per_px:
+                draw_scale_bar(image, self._um_per_px)
             self._captured += 1
             self._write_frame(image, temperature)
             self._publish(image)
@@ -365,6 +372,51 @@ class CameraFeed:
         except Exception:  # pragma: no cover - a sidecar must not be fatal
             log.exception("could not write the video's sidecar")
 
+    # -- the scale bar ------------------------------------------------------ #
+    def set_scale(self, x1: float, y1: float, x2: float, y2: float, microns: float):
+        """Set the scale from two points the user clicked.
+
+        The points are in pixels of the picture, and the distance between
+        them is however many micrometres the user says it is.  From that
+        the scale bar is worked out, and it is drawn on every frame from
+        then on -- including the recorded ones.
+        """
+        distance = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        if distance <= 0:
+            raise ValueError("the two points are in the same place")
+        if microns <= 0:
+            raise ValueError("the distance has to be more than nothing")
+        with self._lock:
+            self._um_per_px = microns / distance
+            self._scale_points = (x1, y1, x2, y2)
+            value = self._um_per_px
+        log.info("the scale is %.6g micrometres a pixel", value)
+        return self.scale()
+
+    def clear_scale(self) -> None:
+        """Take the scale bar away."""
+        with self._lock:
+            self._um_per_px = None
+            self._scale_points = None
+
+    def scale(self) -> dict:
+        """The scale, as the UI wants it."""
+        with self._lock:
+            um_per_px = self._um_per_px
+            points = self._scale_points
+        if not um_per_px:
+            return {"set": False}
+        distance = 0.0
+        if points:
+            distance = (
+                (points[2] - points[0]) ** 2 + (points[3] - points[1]) ** 2
+            ) ** 0.5
+        return {
+            "set": True,
+            "um_per_px": um_per_px,
+            "measured_px": distance,
+        }
+
     # -- the state the UI shows --------------------------------------------- #
     def state(self) -> dict:
         """Everything the UI needs to know about the camera."""
@@ -378,6 +430,7 @@ class CameraFeed:
                 "recording_path": str(recording) if recording else None,
                 "recorded_frames": self._recording_frames,
                 "camera": getattr(self._source, "name", None),
+                "scale": self.scale(),
             }
 
     def _set_error(self, message: str) -> None:

@@ -126,7 +126,7 @@
   .video-wrap {
     position: relative; background: var(--navy-5);
     border: 1px solid var(--navy-60); border-radius: 8px; overflow: hidden;
-    aspect-ratio: 4 / 3; max-height: 68vh;
+    aspect-ratio: 4 / 3; max-height: 68vh; padding: 8px;
     display: flex; align-items: center; justify-content: center;
   }
   .video-wrap img {
@@ -138,6 +138,11 @@
     text-align: center; padding: 0 20px;
   }
   .video-wrap.live .waiting { display: none; }
+  /* The two clicks that set the scale. */
+  .video-wrap.measuring { cursor: crosshair; }
+  .video-wrap .marks { position: absolute; inset: 0; pointer-events: none; }
+  .video-wrap .marks line { stroke: var(--sky); stroke-width: 2; }
+  .video-wrap .marks circle { fill: none; stroke: var(--sky); stroke-width: 2; }
 
   /* -- the temperature ------------------------------------------------ */
   .temp { display: flex; align-items: baseline; gap: 10px; }
@@ -298,15 +303,18 @@
         <img id="video" alt="Live picture from the microscope. The time is
              written in the lower left of the picture and the temperature in
              the upper right.">
+        <svg class="marks" id="marks" aria-hidden="true"></svg>
         <div class="waiting" id="videowait">no camera</div>
       </div>
       <div class="row" style="margin-top:12px; align-items:center">
         <label class="check" for="v-prog">
           <input type="checkbox" id="v-prog"> record the video with the programme
         </label>
+        <button id="v-scale" type="button" style="flex:0 0 auto" aria-pressed="false">Scale bar</button>
         <button id="v-now" type="button" style="flex:0 0 auto">Record now</button>
       </div>
       <p class="hint" id="videostate"></p>
+      <p class="hint" id="scalestate"></p>
       <p class="hint">The time is written in the lower left of the picture and
       the temperature in the upper right. They are burned into the frames, so a
       recording carries its own numbers.</p>
@@ -369,6 +377,30 @@
     </div>
   </section>
 </main>
+
+<!-- How long is the distance between the two clicks? -->
+<div class="modal" id="scalemodal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="scaletitle">
+    <h2 id="scaletitle">How long is that?</h2>
+    <p class="hint" style="margin-top:0">The two clicks are
+    <span id="scaledist" class="mono">—</span> pixels apart in the picture. Say
+    how far apart they are in reality and a scale bar is drawn from then on.</p>
+
+    <div class="field">
+      <label for="scale-um">Distance between the clicks (µm)</label>
+      <input id="scale-um" type="number" step="any" min="0" inputmode="decimal">
+    </div>
+    <div class="field">
+      <label for="scale-pp">…or the scale itself (µm a pixel)</label>
+      <input id="scale-pp" type="number" step="any" min="0" inputmode="decimal">
+    </div>
+
+    <div class="actions">
+      <button id="scale-cancel" type="button" style="flex:1">Cancel</button>
+      <button id="scale-ok" type="button" class="primary" style="flex:2">Set the scale</button>
+    </div>
+  </div>
+</div>
 
 <!-- Where the experiment's data goes. -->
 <div class="modal" id="savemodal" hidden>
@@ -592,13 +624,182 @@ function applyCamera(camera) {
   if (camera.record_with_programme !== undefined) {
     $("v-prog").checked = !!camera.record_with_programme;
   }
+  applyScale(camera.scale);
+}
+
+/* The scale bar: what it is, and whether there is one. */
+function applyScale(scale) {
+  const note = $("scalestate");
+  if (!scale || !scale.set) {
+    note.dataset.keep = "";
+    if (!state.measuring) note.textContent = "";
+    return;
+  }
+  const um = scale.um_per_px;
+  const text = `Scale bar: ${um < 0.01 ? (um * 1000).toFixed(2) + " nm" : um.toFixed(4) + " µm"} a pixel.`;
+  note.dataset.keep = text;
+  if (!state.measuring) note.textContent = text;
 }
 
 /* The camera's controls only work when there is a camera. */
 function setCameraControls(enabled) {
   $("v-prog").disabled = !enabled;
   $("v-now").disabled = !enabled;
+  $("v-scale").disabled = !enabled;
 }
+
+/* ------------------------------------------------------------------ *
+ * The scale bar.
+ *
+ * Two clicks on the picture say how far apart they are, and the bar is
+ * drawn from then on -- on the live picture and in the recording.
+ * ------------------------------------------------------------------ */
+
+let scaleClicks = [];
+
+/* Where the picture is actually drawn, in the page's pixels. */
+function pictureRect() {
+  const img = $("video");
+  const box = img.getBoundingClientRect();
+  const natW = img.naturalWidth, natH = img.naturalHeight;
+  if (!natW || !natH || !box.width) return null;
+  const scale = Math.min(box.width / natW, box.height / natH);
+  const w = natW * scale, h = natH * scale;
+  return {
+    left: box.left + (box.width - w) / 2,
+    top: box.top + (box.height - h) / 2,
+    width: w,
+    height: h,
+    naturalWidth: natW,
+    naturalHeight: natH,
+  };
+}
+
+/* The click, in pixels of the picture itself. */
+function picturePoint(event) {
+  const rect = pictureRect();
+  if (!rect) return null;
+  return {
+    x: (event.clientX - rect.left) / rect.width * rect.naturalWidth,
+    y: (event.clientY - rect.top) / rect.height * rect.naturalHeight,
+  };
+}
+
+/* The markers for the clicks, drawn over the picture. */
+function drawMarks() {
+  const svg = $("marks");
+  const rect = pictureRect();
+  if (!rect || scaleClicks.length === 0) { svg.innerHTML = ""; return; }
+  const wrap = $("videowrap").getBoundingClientRect();
+  svg.style.left = `${rect.left - wrap.left}px`;
+  svg.style.top = `${rect.top - wrap.top}px`;
+  svg.style.width = `${rect.width}px`;
+  svg.style.height = `${rect.height}px`;
+  svg.setAttribute("viewBox", `0 0 ${rect.width} ${rect.height}`);
+
+  const toScreen = (p) => {
+    const nat = { w: rect.naturalWidth, h: rect.naturalHeight };
+    return {
+      x: (p.x / nat.w) * rect.width,
+      y: (p.y / nat.h) * rect.height,
+    };
+  };
+  const points = scaleClicks.map(toScreen);
+  let marks = "";
+  for (const p of points) {
+    marks += `<circle cx="${p.x}" cy="${p.y}" r="7"></circle>`;
+  }
+  if (points.length === 2) {
+    marks += `<line x1="${points[0].x}" y1="${points[0].y}" x2="${points[1].x}" y2="${points[1].y}"></line>`;
+  }
+  svg.innerHTML = marks;
+}
+
+function setMeasuring(on) {
+  state.measuring = !!on;
+  $("videowrap").classList.toggle("measuring", state.measuring);
+  $("v-scale").setAttribute("aria-pressed", state.measuring ? "true" : "false");
+  $("v-scale").textContent = state.measuring ? "Cancel scale" : "Scale bar";
+  if (!state.measuring) { scaleClicks = []; drawMarks(); }
+  $("scalestate").textContent = state.measuring
+    ? "Click twice on the picture to measure a distance."
+    : ($("scalestate").dataset.keep || "");
+}
+
+async function onPictureClick(event) {
+  if (!state.measuring) return;
+  const point = picturePoint(event);
+  if (!point) return;
+  scaleClicks.push(point);
+  drawMarks();
+  if (scaleClicks.length < 2) {
+    $("scalestate").textContent = "Now click the second point.";
+    return;
+  }
+  const [a, b] = scaleClicks;
+  const pixels = Math.hypot(b.x - a.x, b.y - a.y);
+  $("scaledist").textContent = pixels.toFixed(0);
+  $("scale-um").value = "";
+  $("scale-pp").value = "";
+  $("scalestate").textContent = "Say how long that distance is.";
+  openScaleDialog();
+}
+
+let scaleReturnFocus = null;
+
+function openScaleDialog() {
+  scaleReturnFocus = document.activeElement;
+  $("scalemodal").hidden = false;
+  $("scale-um").focus();
+}
+
+function closeScaleDialog() {
+  $("scalemodal").hidden = true;
+  scaleClicks = [];
+  drawMarks();
+  if (scaleReturnFocus && scaleReturnFocus.focus) scaleReturnFocus.focus();
+}
+
+$("v-scale").addEventListener("click", () => {
+  if (state.measuring) { setMeasuring(false); return; }
+  setMeasuring(true);
+});
+$("video").addEventListener("click", onPictureClick);
+$("scale-cancel").addEventListener("click", closeScaleDialog);
+$("scale-ok").addEventListener("click", async () => {
+  const perPixel = parseFloat($("scale-pp").value);
+  const um = parseFloat($("scale-um").value);
+  const points = scaleClicks;
+  if (!Number.isFinite(um) && !Number.isFinite(perPixel)) {
+    addLog({ phase: "error", message: "say how long the distance is", error: true, time: Date.now() / 1000 });
+    return;
+  }
+  let result;
+  if (Number.isFinite(perPixel) && perPixel > 0) {
+    // The scale itself: pick any two points to stand for one pixel.
+    const p = points[0] || { x: 0, y: 0 };
+    result = await post("/api/scale", {
+      x1: p.x, y1: p.y, x2: p.x + 1, y2: p.y,
+      microns: perPixel,
+    });
+  } else {
+    result = await post("/api/scale", {
+      x1: points[0].x, y1: points[0].y, x2: points[1].x, y2: points[1].y,
+      microns: um,
+    });
+  }
+  if (result && result.ok) {
+    setMeasuring(false);
+    closeScaleDialog();
+  }
+});
+$("scalemodal").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeScaleDialog(); return; }
+  trapFocus(e);
+});
+$("scalemodal").addEventListener("click", (e) => {
+  if (e.target === $("scalemodal")) closeScaleDialog();
+});
 
 function draw() {
   const c = $("spark");
@@ -888,9 +1089,10 @@ $("video").addEventListener("load", () => {
   if (img.naturalWidth && img.naturalHeight) {
     $("videowrap").style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
   }
+  drawMarks();
 });
 
-window.addEventListener("resize", draw);
+window.addEventListener("resize", () => { draw(); drawMarks(); });
 
 const es = new EventSource("/api/stream");
 es.onmessage = (m) => {

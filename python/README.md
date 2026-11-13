@@ -305,6 +305,13 @@ The page shows:
 * a log of the programme's phase changes, and a link to download the
   CSV.
 
+**The scale bar.**  *Scale bar* in the camera card turns on measuring:
+click twice on the picture and the app asks how far apart the two
+clicks are in reality.  From then on a bar is drawn in the lower right
+of every frame — with the round number of micrometres it stands for —
+so the recording carries its own scale.  The scale can also be typed in
+directly, for anyone who would rather not use a pointing device.
+
 **Where the data goes.**  *Save to…* in the header opens a pop-up that
 chooses the folder.  The name defaults to the date and the time
 (`experiment-20261112-191503`) and a prefix can be added to it

@@ -43,21 +43,31 @@ function stubContext() {
 
 function stubElement() {
   const el = {
-    textContent: "", className: "", children: [], value: "1",
-    addEventListener() {}, prepend() {}, removeChild() {},
+    textContent: "", className: "", children: [], value: "1", dataset: {},
+    addEventListener(type, fn) { (el._listeners[type] ||= []).push(fn); },
+    prepend() {}, removeChild() {},
     getContext: () => stubContext(),
     getAttribute(name) {
       return this._attrs && this._attrs[name] !== undefined
         ? this._attrs[name] : null;
     },
+    setAttribute(name, value) { this._attrs[name] = value; },
     set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html || ""; },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 640, height: 480 }; },
+    click() { (el._listeners.click || []).forEach((fn) => fn({ target: el })); },
   };
+  el._listeners = {};
   el._attrs = {};
   el.classList = {
     add(c) { if (!el.className.split(" ").includes(c)) {
       el.className = (el.className + " " + c).trim(); } },
     remove(c) { el.className = el.className.split(" ").filter(x => x !== c).join(" "); },
     contains(c) { return el.className.split(" ").includes(c); },
+    toggle(c, on) {
+      const has = el.classList.contains(c);
+      if (on === undefined ? has : !on) el.classList.remove(c);
+      else el.classList.add(c);
+    },
   };
   Object.defineProperty(el, "src", {
     get() { return el._attrs.src || ""; },
@@ -201,6 +211,25 @@ applyCamera(null);
 checkThat("no camera at all is handled",
   !el("videowrap").classList.contains("live"));
 checkThat("and the page says so", /without a camera/.test(el("videostate").textContent));
+
+// -- the scale bar ---------------------------------------------------------- //
+applyCamera({ open: true, error: null, recording: false, recorded_frames: 0,
+              scale: { set: true, um_per_px: 0.25 } });
+checkThat("the scale is said so", /0\.2500 µm a pixel/.test(el("scalestate").textContent));
+
+applyCamera({ open: true, error: null, recording: false, recorded_frames: 0,
+              scale: { set: false } });
+checkThat("no scale, nothing said", el("scalestate").textContent === "");
+
+el("v-scale").click();
+checkThat("the scale button turns into a cancel",
+  el("v-scale").textContent === "Cancel scale");
+checkThat("and the picture is marked for measuring",
+  el("videowrap").classList.contains("measuring"));
+el("v-scale").click();
+checkThat("and back again", el("v-scale").textContent === "Scale bar");
+checkThat("the measuring mark is taken away",
+  !el("videowrap").classList.contains("measuring"));
 
 // --------------------------------------------------------------------------- //
 // The report
