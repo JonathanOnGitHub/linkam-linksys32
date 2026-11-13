@@ -342,6 +342,9 @@ class StageController:
             # camera that will not open must not stop the temperature link.
             self._camera.set_output_dir(self.output_dir)
             self._camera.set_state_provider(self._temperature_and_setpoint)
+            # The elapsed clock counts from the start of the experiment,
+            # which is the same zero the CSV's elapsed_s counts from.
+            self._camera.set_epoch(self._session_started)
             self._camera.open()
 
     def close(self) -> None:
@@ -823,6 +826,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(200, self._video_command(body, controller))
             elif path == "/api/scale":
                 self._send_json(200, self._scale_command(body, controller))
+            elif path == "/api/clock":
+                self._send_json(200, self._clock_command(body, controller))
             elif path == "/api/output":
                 self._send_json(200, self._output_command(body, controller))
             else:
@@ -866,6 +871,17 @@ class _Handler(BaseHTTPRequestHandler):
             controller.unsubscribe(subscription)
 
     # -- the camera ---------------------------------------------------------- #
+    def _clock_command(self, body: dict, controller) -> dict:
+        """Which clock to write on the frames.
+
+        The time since the start of the experiment, or the time of day.
+        """
+        camera = controller._camera
+        if camera is None:
+            raise RuntimeError("there is no camera")
+        mode = camera.set_clock(str(body.get("mode", "elapsed")))
+        return {"ok": True, "clock": mode}
+
     def _scale_command(self, body: dict, controller) -> dict:
         """Set or clear the scale bar.
 

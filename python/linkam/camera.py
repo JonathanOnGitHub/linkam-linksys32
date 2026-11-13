@@ -101,6 +101,11 @@ class CameraFeed:
         self._um_per_px: float | None = None
         #: The two points the user clicked, in pixels of the picture.
         self._scale_points: tuple | None = None
+        #: The clock on the frames: "elapsed" (since the start of the
+        #: experiment) or "wall" (the time of day).
+        self._clock = "elapsed"
+        #: The start of the experiment, which the elapsed clock counts from.
+        self._epoch: float | None = None
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -181,12 +186,23 @@ class CameraFeed:
                 image,
                 temperature_c=temperature,
                 target_c=target,
-                when=frame.timestamp,
+                when=self._clock_time(frame.timestamp),
                 scale_um_per_px=self._um_per_px,
+                elapsed=self._clock == "elapsed",
             )
             self._captured += 1
             self._write_frame(image, temperature)
             self._publish(image)
+
+    def _clock_time(self, timestamp: float) -> float:
+        """The time to write, in the clock that is set.
+
+        The elapsed clock counts from the start of the experiment, which
+        is the same zero the telemetry CSV's ``elapsed_s`` counts from.
+        """
+        if self._clock != "elapsed" or self._epoch is None:
+            return timestamp
+        return timestamp - self._epoch
 
     def _read_state(self) -> tuple:
         try:
@@ -372,6 +388,27 @@ class CameraFeed:
             log.exception("could not write the video's sidecar")
 
     # -- the scale bar ------------------------------------------------------ #
+    def set_clock(self, mode: str) -> str:
+        """Which clock to write on the frames.
+
+        ``"elapsed"`` counts from the start of the experiment, which is
+        the default; ``"wall"`` is the time of day.
+        """
+        mode = "wall" if str(mode).lower().startswith("wall") else "elapsed"
+        with self._lock:
+            self._clock = mode
+        return mode
+
+    def set_epoch(self, when: float | None) -> None:
+        """The start of the experiment, which the elapsed clock counts from."""
+        with self._lock:
+            self._epoch = when
+
+    def clock(self) -> str:
+        """Which clock is being written."""
+        with self._lock:
+            return self._clock
+
     def set_scale(self, x1: float, y1: float, x2: float, y2: float, microns: float):
         """Set the scale from two points the user clicked.
 
@@ -430,6 +467,7 @@ class CameraFeed:
                 "recorded_frames": self._recording_frames,
                 "camera": getattr(self._source, "name", None),
                 "scale": self.scale(),
+                "clock": self.clock(),
             }
 
     def _set_error(self, message: str) -> None:

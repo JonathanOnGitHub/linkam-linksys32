@@ -305,6 +305,13 @@ The page shows:
 * a log of the programme's phase changes, and a link to download the
   CSV.
 
+**The clock on the frames.**  The clock in the lower left of the
+picture is, by default, the **time since the start of the experiment**
+— written `T+00:04:31`, which cannot be mistaken for a time of day.
+It counts from the same zero the telemetry CSV's `elapsed_s` counts
+from, so the video and the CSV agree.  The *Clock* menu in the camera
+card switches it to the time of day instead.
+
 **The scale bar.**  *Scale bar* in the camera card turns on measuring:
 click twice on the picture and the app asks how far apart the two
 clicks are in reality.  From then on a bar is drawn in the lower right

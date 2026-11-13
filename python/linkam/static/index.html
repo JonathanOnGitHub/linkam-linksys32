@@ -313,6 +313,14 @@
         <button id="v-scale" type="button" style="flex:0 0 auto" aria-pressed="false">Scale bar</button>
         <button id="v-now" type="button" style="flex:0 0 auto">Record now</button>
       </div>
+      <div class="row" style="margin-top:10px; align-items:center">
+        <label for="v-clock" style="margin-bottom:0">Clock</label>
+        <select id="v-clock" style="flex:0 0 auto">
+          <option value="elapsed" selected>Since the start</option>
+          <option value="wall">Real time</option>
+        </select>
+        <span class="hint" style="margin:0; flex:1 1 auto">on the frames</span>
+      </div>
       <p class="hint" id="videostate"></p>
       <p class="hint" id="scalestate"></p>
       <p class="hint">The time is written in the lower left of the picture and
@@ -625,6 +633,7 @@ function applyCamera(camera) {
     $("v-prog").checked = !!camera.record_with_programme;
   }
   applyScale(camera.scale);
+  if (camera.clock !== undefined) $("v-clock").value = camera.clock;
 }
 
 /* The scale bar: what it is, and whether there is one. */
@@ -763,6 +772,9 @@ function closeScaleDialog() {
 $("v-scale").addEventListener("click", () => {
   if (state.measuring) { setMeasuring(false); return; }
   setMeasuring(true);
+});
+$("v-clock").addEventListener("change", async (e) => {
+  await post("/api/clock", { mode: e.target.value });
 });
 $("video").addEventListener("click", onPictureClick);
 $("scale-cancel").addEventListener("click", closeScaleDialog);

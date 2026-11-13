@@ -590,6 +590,12 @@ The name defaults to the date and the time, and a prefix can be added
 to it — `run7-experiment-20261112-191503` — so a run can be found again
 afterwards.  The folders of the machine can be browsed in the pop-up.
 
+**The clock on the frames.**  The clock in the picture is the time
+since the start of the experiment, written `T+00:04:31`, so it cannot
+be mistaken for a time of day.  It counts from the same zero the CSV's
+`elapsed_s` does, so the video and the CSV agree.  The *Clock* menu in
+the camera card switches it to the time of day.
+
 **The scale bar.**  The picture needs a scale to be worth anything.
 *Scale bar* in the camera card turns on measuring: click twice on the
 picture and say how far apart the two clicks are in reality — the eye

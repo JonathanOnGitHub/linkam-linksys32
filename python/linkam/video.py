@@ -1010,6 +1010,23 @@ class SyntheticBackend(VideoSource):
 # --------------------------------------------------------------------------- #
 
 
+def format_clock(when: float, elapsed: bool = False) -> str:
+    """The clock on a frame.
+
+    A wall clock reads as a time of day; the time since the start of
+    the experiment reads as ``T+00:04:31``, which cannot be mistaken
+    for one.
+    """
+    if elapsed:
+        total = int(max(when, 0))
+        hours, rest = divmod(total, 3600)
+        minutes, seconds = divmod(rest, 60)
+        return f"T+{hours:02d}:{minutes:02d}:{seconds:02d}"
+    from datetime import datetime
+
+    return datetime.fromtimestamp(when).strftime("%H:%M:%S")
+
+
 def annotate(
     image,
     *,
@@ -1017,6 +1034,7 @@ def annotate(
     target_c=None,
     when=None,
     scale_um_per_px=None,
+    elapsed=False,
 ):
     """Write the time and the temperature onto a frame.
 
@@ -1041,6 +1059,9 @@ def annotate(
         The time to write, as a UNIX timestamp.  ``None`` uses now.
     scale_um_per_px:
         How many micrometres one pixel is.  ``None`` writes no scale bar.
+    elapsed:
+        Whether the time is the time since the start of the experiment
+        rather than the time of day.
     """
     if image is None:
         return image
@@ -1065,7 +1086,7 @@ def annotate(
     small = _load_font(_SANS_FONTS, max(9, round(h * 0.028)))
 
     # -- the time, lower left, on the baseline ------------------------------ #
-    stamp = datetime.fromtimestamp(when).strftime("%H:%M:%S")
+    stamp = format_clock(when, elapsed)
     _draw_text(image, stamp, mono, layout["left"], layout["baseline"], "left", "bottom")
 
     # How much of the bottom the clock takes, so the scale bar knows how

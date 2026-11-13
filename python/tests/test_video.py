@@ -189,3 +189,19 @@ def test_no_scale_bar_without_a_scale(frame):
 
     draw_scale_bar(frame, 0)
     assert not frame.any(), "nothing is drawn"
+
+
+def test_the_clock_can_be_the_time_of_day_or_the_time_since_the_start():
+    from linkam.video import format_clock
+
+    assert format_clock(3661, True) == "T+01:01:01"
+    assert format_clock(0, True) == "T+00:00:00"
+    assert format_clock(59, True) == "T+00:00:59"
+    assert format_clock(1700000000, False) == "22:13:20"
+
+
+def test_the_elapsed_clock_cannot_be_mistaken_for_the_time_of_day():
+    from linkam.video import format_clock
+
+    assert format_clock(3661, True).startswith("T+")
+    assert not format_clock(1700000000, False).startswith("T+")

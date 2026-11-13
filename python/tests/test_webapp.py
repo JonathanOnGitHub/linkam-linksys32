@@ -37,9 +37,14 @@ PAGE_CHECK = Path(__file__).parent.parent / "tools" / "check_page.py"
 
 
 class FakeProgrammer:
-    """Enough of the programmer interface for the controller and the runner."""
+    """Enough of the programmer interface for the controller and the runner.
 
-    def __init__(self):
+    With ``block=True`` the ramp does not finish until the test says so,
+    which is what a test that needs a programme to still be running has
+    to be able to ask for.
+    """
+
+    def __init__(self, block: bool = False):
         self.port = "fake"
         self._state = ProgrammerState(connected=True)
         self._listeners = []
@@ -48,6 +53,13 @@ class FakeProgrammer:
         self.stopped = 0
         self.opened = 0
         self.closed = 0
+        self._release = threading.Event()
+        if not block:
+            self._release.set()
+
+    def release(self) -> None:
+        """Let a held ramp finish."""
+        self._release.set()
 
     # -- lifecycle ---------------------------------------------------------- #
     def open(self):
@@ -81,6 +93,7 @@ class FakeProgrammer:
         self.stopped += 1
 
     def wait_for_temperature(self, target_c, tolerance_c=0.5, timeout=3600.0, **kw):
+        self._release.wait(timeout)
         self._state.temperature = target_c
         return target_c
 
@@ -196,10 +209,26 @@ def test_a_ramp_is_refused_outside_the_instruments_range(controller):
         controller.start_ramp(40.0, -1.0, 0.0)
 
 
-def test_two_programmes_cannot_run_at_once(controller):
-    controller.start_ramp(40.0, 5.0, 30.0)
-    with pytest.raises(RuntimeError):
-        controller.start_ramp(50.0, 5.0, 30.0)
+def test_two_programmes_cannot_run_at_once(tmp_path):
+    """A second programme is refused while the first is running.
+
+    The first ramp is held open, so the test does not depend on how
+    quickly the programme thread gets through it.
+    """
+    prog = FakeProgrammer(block=True)
+    ctl = StageController(prog, output_dir=tmp_path / "out")
+    ctl.open()
+    try:
+        ctl.start_ramp(40.0, 5.0, 30.0)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not prog.ramps:
+            time.sleep(0.01)
+        assert prog.ramps, "the first ramp was programmed"
+        with pytest.raises(RuntimeError):
+            ctl.start_ramp(50.0, 5.0, 30.0)
+    finally:
+        prog.release()
+        ctl.close()
 
 
 def test_stop_stops_the_instrument(controller):
@@ -817,6 +846,36 @@ def test_a_scale_of_nothing_is_refused(camera_server):
     )
     assert status == 400
     assert "error" in payload
+
+
+def test_the_clock_is_the_time_since_the_start_by_default(camera_controller):
+    """The elapsed clock is the default, and it counts from the start."""
+    ctl, feed = camera_controller
+    assert feed.clock() == "elapsed"
+    assert ctl.state()["camera"]["clock"] == "elapsed"
+
+
+def test_the_clock_can_be_the_time_of_day(camera_server):
+    ctl, feed, url = camera_server
+    status, payload = post(url + "/api/clock", {"mode": "wall"})
+    assert status == 200
+    assert payload["clock"] == "wall"
+    assert feed.clock() == "wall"
+
+    status, payload = post(url + "/api/clock", {"mode": "elapsed"})
+    assert status == 200
+    assert payload["clock"] == "elapsed"
+
+
+def test_the_elapsed_clock_counts_from_the_start_of_the_experiment(camera_controller):
+    """The same zero the telemetry CSV's elapsed_s counts from."""
+    ctl, feed = camera_controller
+    feed.set_epoch(1000.0)
+    assert feed._clock_time(1300.0) == pytest.approx(300.0)
+
+    # With the wall clock, the timestamp is written as it is.
+    feed.set_clock("wall")
+    assert feed._clock_time(1300.0) == pytest.approx(1300.0)
 
 
 def test_a_camera_that_will_not_open_does_not_stop_the_gui(tmp_path):
